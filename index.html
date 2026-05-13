@@ -1,0 +1,1753 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PDF → Excel Pro | Mali Müşavirlik Araçları</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600;700&display=swap');
+
+:root {
+  --bg: #0f1117;
+  --panel: #181b24;
+  --panel2: #20242f;
+  --panel3: #272b38;
+  --border: #2e3347;
+  --border2: #3a3f56;
+  --accent: #00e5a0;
+  --accent-dim: rgba(0,229,160,0.12);
+  --accent2: #4d8aff;
+  --accent2-dim: rgba(77,138,255,0.12);
+  --warn: #ffb020;
+  --warn-dim: rgba(255,176,32,0.12);
+  --danger: #ff4d6a;
+  --danger-dim: rgba(255,77,106,0.12);
+  --text: #e8eaf2;
+  --text2: #b0b5cc;
+  --muted: #666c8a;
+  --mono: 'IBM Plex Mono', monospace;
+  --sans: 'IBM Plex Sans', sans-serif;
+}
+
+* { margin:0; padding:0; box-sizing:border-box; }
+html, body { height:100%; overflow:hidden; }
+
+body {
+  font-family: var(--sans);
+  background: var(--bg);
+  color: var(--text);
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── Top bar ── */
+.topbar {
+  height: 52px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  padding: 0 16px;
+  gap: 10px;
+  flex-shrink: 0;
+  z-index: 100;
+}
+.logo {
+  font-family: var(--mono);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--accent);
+  letter-spacing: -0.5px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-right: 4px;
+}
+.logo-icon {
+  width: 28px; height: 28px;
+  background: var(--accent-dim);
+  border: 1px solid rgba(0,229,160,0.3);
+  border-radius: 6px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 13px;
+}
+.topbar-sep { width: 1px; height: 22px; background: var(--border); }
+
+.btn {
+  font-family: var(--sans);
+  font-size: 12px;
+  font-weight: 500;
+  padding: 7px 13px;
+  border-radius: 7px;
+  border: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+.btn:disabled { opacity: 0.35; cursor: not-allowed; }
+.btn-ghost {
+  background: transparent;
+  color: var(--text2);
+  border: 1px solid var(--border);
+}
+.btn-ghost:hover:not(:disabled) {
+  background: var(--panel2);
+  color: var(--text);
+  border-color: var(--border2);
+}
+.btn-primary { background: var(--accent); color: #000; font-weight: 700; letter-spacing: -0.2px; }
+.btn-primary:hover:not(:disabled) { background: #00fbb3; box-shadow: 0 0 16px rgba(0,229,160,0.3); }
+.btn-blue { background: var(--accent2); color: #fff; font-weight: 600; }
+.btn-blue:hover:not(:disabled) { background: #6b9dff; }
+.btn-warn { background: var(--warn); color: #000; font-weight: 600; }
+.btn-warn:hover:not(:disabled) { background: #ffbe40; }
+.btn-danger { background: transparent; color: var(--danger); border: 1px solid rgba(255,77,106,0.35); }
+.btn-danger:hover:not(:disabled) { background: var(--danger-dim); border-color: var(--danger); }
+
+.topbar-right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+.page-info {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+  padding: 4px 10px;
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  min-width: 60px;
+  text-align: center;
+}
+
+/* ── Main layout ── */
+.workspace {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+}
+
+/* ── Left sidebar ── */
+.sidebar {
+  width: 200px;
+  flex-shrink: 0;
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.sidebar-head {
+  padding: 10px 14px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1.2px;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.page-thumbs {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.page-thumbs::-webkit-scrollbar { width: 3px; }
+.page-thumbs::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+.thumb {
+  background: var(--panel2);
+  border: 1.5px solid var(--border);
+  border-radius: 7px;
+  cursor: pointer;
+  overflow: hidden;
+  transition: all 0.15s;
+  position: relative;
+}
+.thumb:hover { border-color: var(--border2); transform: translateY(-1px); }
+.thumb.active { border-color: var(--accent); box-shadow: 0 0 10px rgba(0,229,160,0.15); }
+.thumb canvas { width: 100%; display: block; }
+.thumb-label {
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--muted);
+  text-align: center;
+  padding: 4px;
+  border-top: 1px solid var(--border);
+}
+.thumb.active .thumb-label { color: var(--accent); }
+.thumb-badge {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  background: var(--accent);
+  color: #000;
+  font-size: 8px;
+  font-weight: 800;
+  padding: 1px 6px;
+  border-radius: 10px;
+  font-family: var(--mono);
+}
+
+/* Empty state */
+.empty-state {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 24px 16px;
+  text-align: center;
+}
+.empty-icon { font-size: 36px; opacity: 0.3; }
+.empty-title { font-size: 13px; font-weight: 600; opacity: 0.5; }
+.empty-sub { font-size: 11px; color: var(--muted); line-height: 1.5; }
+.drop-area {
+  border: 1.5px dashed var(--border);
+  border-radius: 10px;
+  padding: 16px;
+  cursor: pointer;
+  transition: all 0.2s;
+  width: 100%;
+}
+.drop-area:hover, .drop-area.over {
+  border-color: var(--accent);
+  background: var(--accent-dim);
+}
+.drop-area-text { font-size: 11px; color: var(--muted); }
+#fileInput { display: none; }
+
+/* ── PDF Viewer ── */
+.viewer-wrap {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  position: relative;
+}
+
+.viewer-toolbar {
+  height: 42px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  padding: 0 14px;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.toolbar-hint {
+  font-size: 11px;
+  color: var(--muted);
+  font-family: var(--mono);
+}
+.toolbar-hint span { color: var(--accent); }
+.mode-indicator {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  font-size: 11px;
+  color: var(--muted);
+  font-family: var(--mono);
+}
+.mode-dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: pulse 2s infinite;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+.viewer-scroll {
+  flex: 1;
+  overflow: auto;
+  background: #0a0c10;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 28px;
+}
+.viewer-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
+.viewer-scroll::-webkit-scrollbar-track { background: #0a0c10; }
+.viewer-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+.pdf-page-wrap {
+  position: relative;
+  display: inline-block;
+  cursor: crosshair;
+  box-shadow: 0 12px 60px rgba(0,0,0,0.8), 0 0 0 1px var(--border);
+  border-radius: 2px;
+}
+.pdf-page-wrap canvas { display: block; }
+
+/* Selection rect */
+.sel-rect {
+  position: absolute;
+  border: 2px solid var(--accent);
+  background: rgba(0,229,160,0.1);
+  pointer-events: none;
+  display: none;
+  z-index: 10;
+  border-radius: 2px;
+}
+
+/* Saved selections overlay */
+.saved-sel {
+  position: absolute;
+  border: 1.5px solid var(--accent2);
+  background: rgba(77,138,255,0.08);
+  pointer-events: none;
+  z-index: 9;
+}
+.saved-sel-label {
+  position: absolute;
+  top: -20px;
+  left: 0;
+  background: var(--accent2);
+  color: #fff;
+  font-size: 9px;
+  font-family: var(--mono);
+  padding: 2px 6px;
+  border-radius: 3px;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+/* ── Right panel ── */
+.right-panel {
+  width: 290px;
+  flex-shrink: 0;
+  background: var(--panel);
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.right-head {
+  padding: 10px 14px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1.2px;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.right-body { flex: 1; overflow-y: auto; }
+.right-body::-webkit-scrollbar { width: 3px; }
+.right-body::-webkit-scrollbar-thumb { background: var(--border); }
+
+/* Bank mode panel */
+.bank-mode-bar {
+  padding: 10px 12px;
+  background: var(--panel2);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.bank-mode-title {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--muted);
+}
+.bank-select {
+  width: 100%;
+  background: var(--panel3);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 12px;
+  padding: 6px 10px;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath fill='%23666c8a' d='M0 0l5 6 5-6z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+}
+.bank-select:focus { outline: none; border-color: var(--accent2); }
+
+.bank-opts {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.bank-opt-toggle {
+  font-size: 10px;
+  font-family: var(--mono);
+  padding: 4px 8px;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  background: var(--panel3);
+  color: var(--muted);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.bank-opt-toggle.active {
+  background: var(--accent2-dim);
+  border-color: var(--accent2);
+  color: var(--accent2);
+}
+
+/* Selection list */
+.sel-list { padding: 8px; display: flex; flex-direction: column; gap: 6px; }
+.sel-item {
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  transition: border-color 0.15s;
+}
+.sel-item:hover { border-color: var(--border2); }
+.sel-item-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+.sel-item-title {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--accent2);
+  font-weight: 600;
+}
+.sel-item-del {
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 2px 5px;
+  border-radius: 4px;
+  transition: all 0.15s;
+}
+.sel-item-del:hover { color: var(--danger); background: var(--danger-dim); }
+.sel-item-meta {
+  font-size: 10px;
+  color: var(--muted);
+  font-family: var(--mono);
+  line-height: 1.7;
+}
+.sel-preview {
+  margin-top: 8px;
+  font-size: 9px;
+  color: var(--muted);
+  font-family: var(--mono);
+  background: rgba(0,0,0,0.3);
+  border-radius: 5px;
+  padding: 7px 8px;
+  max-height: 80px;
+  overflow: hidden;
+  line-height: 1.6;
+  border: 1px solid var(--border);
+}
+
+.no-sels {
+  padding: 28px 16px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.7;
+}
+.no-sels-icon { font-size: 28px; margin-bottom: 10px; opacity: 0.3; }
+
+/* Bottom export bar */
+.export-bar {
+  padding: 14px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex-shrink: 0;
+  background: var(--panel);
+}
+.export-bar-title {
+  font-size: 10px;
+  color: var(--muted);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.export-options { display: flex; gap: 6px; }
+.export-opt {
+  flex: 1;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 8px 10px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: var(--panel2);
+  color: var(--text2);
+  cursor: pointer;
+  text-align: center;
+  font-family: var(--sans);
+  transition: all 0.15s;
+}
+.export-opt:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-dim);
+}
+.export-opt:disabled { opacity: 0.3; cursor: not-allowed; }
+.export-all {
+  width: 100%;
+  padding: 11px;
+  background: var(--accent);
+  color: #000;
+  border: none;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 800;
+  cursor: pointer;
+  font-family: var(--sans);
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  letter-spacing: -0.2px;
+}
+.export-all:hover:not(:disabled) {
+  background: #00fbb3;
+  box-shadow: 0 0 20px rgba(0,229,160,0.3);
+}
+.export-all:disabled { opacity: 0.3; cursor: not-allowed; }
+
+/* Status bar */
+.statusbar {
+  height: 26px;
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  padding: 0 14px;
+  gap: 16px;
+  flex-shrink: 0;
+}
+.status-item {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.status-dot {
+  width: 5px; height: 5px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+.status-dot.green { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
+.status-dot.blue { background: var(--accent2); box-shadow: 0 0 6px var(--accent2); }
+.status-dot.warn { background: var(--warn); }
+
+.status-right {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--muted);
+  opacity: 0.5;
+}
+
+/* Zoom controls */
+.zoom-ctrl {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+.zoom-btn {
+  width: 26px; height: 26px;
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text2);
+  cursor: pointer;
+  font-size: 15px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s;
+}
+.zoom-btn:hover { background: var(--panel3); border-color: var(--border2); color: var(--text); }
+.zoom-val {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--muted);
+  min-width: 40px;
+  text-align: center;
+}
+
+/* Toast */
+.toast {
+  position: fixed;
+  bottom: 40px;
+  left: 50%;
+  transform: translateX(-50%) translateY(16px);
+  background: var(--panel3);
+  border: 1px solid var(--border2);
+  color: var(--text);
+  padding: 10px 20px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  opacity: 0;
+  transition: all 0.25s;
+  pointer-events: none;
+  z-index: 9999;
+  white-space: nowrap;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+}
+.toast.show {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+/* Loading overlay */
+.loading {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.75);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 999;
+  display: none;
+  backdrop-filter: blur(4px);
+}
+.loading-box {
+  background: var(--panel);
+  border: 1px solid var(--border2);
+  border-radius: 14px;
+  padding: 32px 48px;
+  text-align: center;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.6);
+}
+.loading-spin {
+  width: 40px; height: 40px;
+  border: 3px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+  margin: 0 auto 16px;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.loading-text {
+  font-size: 13px;
+  color: var(--text2);
+  font-family: var(--mono);
+}
+.loading-sub {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 6px;
+  font-family: var(--mono);
+}
+
+/* About modal */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.75);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9998;
+  display: none;
+  backdrop-filter: blur(4px);
+}
+.modal-overlay.show { display: flex; }
+.modal-box {
+  background: var(--panel);
+  border: 1px solid var(--border2);
+  border-radius: 16px;
+  padding: 32px;
+  max-width: 440px;
+  width: 90%;
+  box-shadow: 0 24px 80px rgba(0,0,0,0.7);
+}
+.modal-logo {
+  font-family: var(--mono);
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--accent);
+  margin-bottom: 6px;
+  letter-spacing: -1px;
+}
+.modal-version {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 20px;
+}
+.modal-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 16px 0;
+}
+.modal-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 0;
+}
+.modal-label {
+  font-size: 11px;
+  color: var(--muted);
+  font-family: var(--mono);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.modal-val {
+  font-size: 12px;
+  color: var(--text);
+  font-family: var(--mono);
+  font-weight: 600;
+}
+.modal-val.accent { color: var(--accent); }
+.modal-desc {
+  font-size: 12px;
+  color: var(--text2);
+  line-height: 1.7;
+  margin: 12px 0;
+}
+.modal-close {
+  margin-top: 20px;
+  width: 100%;
+  padding: 10px;
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 8px;
+  font-size: 13px;
+  cursor: pointer;
+  font-family: var(--sans);
+  transition: all 0.15s;
+}
+.modal-close:hover { background: var(--panel3); border-color: var(--border2); }
+
+/* Scrollbar for right-body */
+.right-body::-webkit-scrollbar { width: 3px; }
+.right-body::-webkit-scrollbar-track { background: transparent; }
+.right-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+/* Smart detect badge */
+.detect-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 9px;
+  font-family: var(--mono);
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: var(--warn-dim);
+  color: var(--warn);
+  border: 1px solid rgba(255,176,32,0.25);
+  margin-top: 4px;
+}
+
+/* Progress bar */
+.progress-bar-wrap {
+  width: 100%;
+  height: 3px;
+  background: var(--border);
+  border-radius: 2px;
+  margin-top: 10px;
+  overflow: hidden;
+}
+.progress-bar-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 2px;
+  transition: width 0.3s;
+}
+</style>
+</head>
+<body>
+
+<!-- Top bar -->
+<div class="topbar">
+  <div class="logo">
+    <div class="logo-icon">⬡</div>
+    PDF→XLS <span style="color:var(--muted);font-size:11px;font-weight:400">PRO</span>
+  </div>
+  <div class="topbar-sep"></div>
+  <button class="btn btn-ghost" onclick="document.getElementById('fileInput').click()">
+    📂 PDF Aç
+  </button>
+  <input type="file" id="fileInput" accept=".pdf" multiple>
+  <div class="topbar-sep"></div>
+  <button class="btn btn-ghost" id="btnAutoAll" disabled onclick="autoExtractAll()">
+    ⚡ Otomatik Tarama
+  </button>
+  <button class="btn btn-warn" id="btnSmartBank" disabled onclick="smartBankExtract()" style="font-size:11px">
+    🏦 Akıllı Banka Modu
+  </button>
+  <div class="topbar-right">
+    <div class="page-info" id="pageInfo">— / —</div>
+    <button class="btn btn-ghost" id="btnPrev" disabled onclick="changePage(-1)">‹</button>
+    <button class="btn btn-ghost" id="btnNext" disabled onclick="changePage(1)">›</button>
+    <div class="topbar-sep"></div>
+    <button class="btn btn-ghost" onclick="showAbout()" style="font-size:11px;padding:6px 10px">ℹ</button>
+  </div>
+</div>
+
+<!-- Workspace -->
+<div class="workspace">
+
+  <!-- Sidebar: page thumbs -->
+  <div class="sidebar">
+    <div class="sidebar-head">Sayfalar</div>
+    <div class="page-thumbs" id="pageThumbs">
+      <div class="empty-state">
+        <div class="empty-icon">📄</div>
+        <div class="empty-title">PDF yükle</div>
+        <div class="empty-sub">Banka ekstresi veya finansal tablo</div>
+        <div class="drop-area" id="dropArea">
+          <div class="drop-area-text">🖱 Sürükle veya tıkla</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- PDF viewer -->
+  <div class="viewer-wrap">
+    <div class="viewer-toolbar">
+      <div class="mode-indicator">
+        <div class="mode-dot"></div>
+        Seçim Modu
+      </div>
+      <div class="toolbar-hint" style="margin-left:8px">
+        <span>▣</span> Tabloyu fareyle seç veya Akıllı Banka Modu'nu kullan
+      </div>
+      <div class="zoom-ctrl">
+        <button class="zoom-btn" onclick="setZoom(zoom - 0.15)">−</button>
+        <div class="zoom-val" id="zoomVal">120%</div>
+        <button class="zoom-btn" onclick="setZoom(zoom + 0.15)">+</button>
+        <button class="zoom-btn" onclick="setZoom(1.2)" title="Sıfırla" style="font-size:11px">↺</button>
+      </div>
+    </div>
+    <div class="viewer-scroll" id="viewerScroll">
+      <div class="pdf-page-wrap" id="pageWrap">
+        <canvas id="pdfCanvas"></canvas>
+        <div class="sel-rect" id="selRect"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Right panel: selections + settings -->
+  <div class="right-panel">
+    <div class="right-head">
+      Seçimler &amp; Dışa Aktar
+      <button class="btn btn-danger" style="font-size:10px;padding:3px 8px" onclick="clearAllSels()">Temizle</button>
+    </div>
+
+    <!-- Bank settings -->
+    <div class="bank-mode-bar">
+      <div class="bank-mode-title">🏦 Banka Profili</div>
+      <select class="bank-select" id="bankSelect" onchange="bankProfileChanged()">
+        <option value="generic">Genel (Tüm PDF'ler)</option>
+        <option value="ziraat">Ziraat Bankası</option>
+        <option value="isbank">İş Bankası</option>
+        <option value="garanti">Garanti BBVA</option>
+        <option value="akbank">Akbank</option>
+        <option value="vakif">VakıfBank</option>
+        <option value="halkbank">Halkbank</option>
+        <option value="yapikredi">Yapı Kredi</option>
+        <option value="denizbank">Denizbank</option>
+        <option value="kuveytturk">Kuveyt Türk</option>
+        <option value="enpara">Enpara / QNB</option>
+      </select>
+      <div class="bank-opts">
+        <button class="bank-opt-toggle active" id="togTrim" onclick="toggleOpt(this,'trim')" title="Boş hücreleri temizle">Temizle</button>
+        <button class="bank-opt-toggle active" id="togNum" onclick="toggleOpt(this,'numbers')" title="Sayısal değerleri düzelt">Sayılar</button>
+        <button class="bank-opt-toggle active" id="togDate" onclick="toggleOpt(this,'dates')" title="Tarihleri biçimlendir">Tarihler</button>
+        <button class="bank-opt-toggle" id="togHeader" onclick="toggleOpt(this,'header')" title="İlk satırı başlık yap">Başlık</button>
+      </div>
+    </div>
+
+    <div class="right-body">
+      <div id="selList">
+        <div class="no-sels">
+          <div class="no-sels-icon">🖱</div>
+          Tablo alanını fareyle seç<br>veya <strong style="color:var(--warn)">Akıllı Banka Modu</strong>'nu kullan.
+        </div>
+      </div>
+    </div>
+
+    <div class="export-bar">
+      <div class="export-bar-title">
+        ⬇ Dışa Aktar
+      </div>
+      <div class="export-options">
+        <button class="export-opt" id="expXlsx" disabled onclick="exportFile('xlsx')">📊 Excel</button>
+        <button class="export-opt" id="expCsv" disabled onclick="exportFile('csv')">📋 CSV</button>
+      </div>
+      <button class="export-all" id="expAll" disabled onclick="exportAll()">
+        ⬇ Tümünü Excel'e Aktar
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- Status bar -->
+<div class="statusbar">
+  <div class="status-item">
+    <div class="status-dot" id="statusDot"></div>
+    <span id="statusText">PDF yüklenmeyi bekliyor</span>
+  </div>
+  <div class="status-item" id="statusSels" style="display:none">
+    <div class="status-dot blue"></div>
+    <span id="statusSelsText">0 seçim</span>
+  </div>
+  <div class="status-right">Levent Emirhan Özhan tarafından geliştirilmiştir</div>
+</div>
+
+<!-- Loading -->
+<div class="loading" id="loading">
+  <div class="loading-box">
+    <div class="loading-spin"></div>
+    <div class="loading-text" id="loadingText">PDF yükleniyor...</div>
+    <div class="loading-sub" id="loadingSub"></div>
+    <div class="progress-bar-wrap" id="progressWrap" style="display:none">
+      <div class="progress-bar-fill" id="progressFill" style="width:0%"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Toast -->
+<div class="toast" id="toast"></div>
+
+<!-- About Modal -->
+<div class="modal-overlay" id="aboutModal" onclick="if(event.target===this) hideAbout()">
+  <div class="modal-box">
+    <div class="modal-logo">▣ PDF→XLS PRO</div>
+    <div class="modal-version">v2.0 — Mali Müşavirlik Sürümü</div>
+
+    <div class="modal-divider"></div>
+
+    <div class="modal-row">
+      <div class="modal-label">Geliştirici</div>
+      <div class="modal-val accent">Levent Emirhan Özhan</div>
+    </div>
+    <div class="modal-row">
+      <div class="modal-label">Amaç</div>
+      <div class="modal-val">Mali Müşavirlik Bürosu</div>
+    </div>
+    <div class="modal-row">
+      <div class="modal-label">Özellikler</div>
+      <div class="modal-val">Banka PDF → Excel</div>
+    </div>
+
+    <div class="modal-divider"></div>
+
+    <div class="modal-desc">
+      Türk bankalarından gelen PDF ekstrelerini (Ziraat, İş Bankası, Garanti, Akbank vb.) akıllı tablo tanıma algoritmasıyla doğrudan Excel formatına dönüştürür. Sayı, tarih ve TL formatları otomatik düzenlenir.
+    </div>
+
+    <div class="modal-divider"></div>
+
+    <div style="font-size:10px;color:var(--muted);font-family:var(--mono);line-height:1.7">
+      PDF.js 3.11 &nbsp;·&nbsp; SheetJS 0.18 &nbsp;·&nbsp; Yerel işlem (sunucu yok)
+    </div>
+
+    <button class="modal-close" onclick="hideAbout()">Kapat</button>
+  </div>
+</div>
+
+<script>
+pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+// ── State ────────────────────────────────────────────
+let pdfDoc = null;
+let currentPage = 1;
+let zoom = 1.2;
+let viewport = null;
+let selections = [];
+let selCounter = 0;
+let isDragging = false;
+let startX = 0, startY = 0;
+let pageWrapRect = null;
+
+// Bank options state
+let bankOpts = { trim: true, numbers: true, dates: true, header: false };
+let currentBank = 'generic';
+
+function toggleOpt(el, key) {
+  bankOpts[key] = !bankOpts[key];
+  el.classList.toggle('active', bankOpts[key]);
+}
+function bankProfileChanged() {
+  currentBank = document.getElementById('bankSelect').value;
+}
+
+// ── File loading ──────────────────────────────────────
+const fileInput = document.getElementById('fileInput');
+const dropArea = document.getElementById('dropArea');
+const viewerScroll = document.getElementById('viewerScroll');
+
+fileInput.addEventListener('change', () => {
+  if (fileInput.files[0]) loadPDF(fileInput.files[0]);
+  fileInput.value = '';
+});
+
+dropArea.addEventListener('click', () => fileInput.click());
+dropArea.addEventListener('dragover', e => { e.preventDefault(); dropArea.classList.add('over'); });
+dropArea.addEventListener('dragleave', () => dropArea.classList.remove('over'));
+dropArea.addEventListener('drop', e => {
+  e.preventDefault(); dropArea.classList.remove('over');
+  if (e.dataTransfer.files[0]) loadPDF(e.dataTransfer.files[0]);
+});
+viewerScroll.addEventListener('dragover', e => e.preventDefault());
+viewerScroll.addEventListener('drop', e => {
+  e.preventDefault();
+  if (e.dataTransfer.files[0]) loadPDF(e.dataTransfer.files[0]);
+});
+
+async function loadPDF(file) {
+  showLoading('PDF yükleniyor...');
+  try {
+    const ab = await file.arrayBuffer();
+    pdfDoc = await pdfjsLib.getDocument({ data: ab }).promise;
+    currentPage = 1;
+    selections = [];
+    selCounter = 0;
+    await renderPage(currentPage);
+    await buildThumbs();
+    updateUI();
+    toast(`✅ ${file.name} — ${pdfDoc.numPages} sayfa`);
+    setStatus('green', `${file.name} yüklendi`);
+  } catch(e) {
+    toast('❌ PDF yüklenemedi: ' + e.message);
+    setStatus('', 'Hata');
+  }
+  hideLoading();
+}
+
+// ── Render ────────────────────────────────────────────
+async function renderPage(pageNum) {
+  const page = await pdfDoc.getPage(pageNum);
+  viewport = page.getViewport({ scale: zoom });
+  const canvas = document.getElementById('pdfCanvas');
+  const ctx = canvas.getContext('2d');
+  canvas.width = viewport.width;
+  canvas.height = viewport.height;
+  await page.render({ canvasContext: ctx, viewport }).promise;
+  document.querySelectorAll('.saved-sel').forEach(e => e.remove());
+  selections.filter(s => s.page === pageNum).forEach(s => drawSavedSel(s));
+  document.getElementById('pageInfo').textContent = `${pageNum} / ${pdfDoc.numPages}`;
+  document.getElementById('btnPrev').disabled = pageNum <= 1;
+  document.getElementById('btnNext').disabled = pageNum >= pdfDoc.numPages;
+  document.querySelectorAll('.thumb').forEach((t, i) => {
+    t.classList.toggle('active', i + 1 === pageNum);
+  });
+}
+
+function drawSavedSel(s) {
+  const wrap = document.getElementById('pageWrap');
+  const div = document.createElement('div');
+  div.className = 'saved-sel';
+  div.dataset.id = s.id;
+  div.style.left = s.x + 'px';
+  div.style.top = s.y + 'px';
+  div.style.width = s.w + 'px';
+  div.style.height = s.h + 'px';
+  const lbl = document.createElement('div');
+  lbl.className = 'saved-sel-label';
+  lbl.textContent = s.label;
+  div.appendChild(lbl);
+  wrap.appendChild(div);
+}
+
+async function buildThumbs() {
+  const container = document.getElementById('pageThumbs');
+  container.innerHTML = '';
+  for (let i = 1; i <= pdfDoc.numPages; i++) {
+    const page = await pdfDoc.getPage(i);
+    const vp = page.getViewport({ scale: 0.16 });
+    const canvas = document.createElement('canvas');
+    canvas.width = vp.width;
+    canvas.height = vp.height;
+    await page.render({ canvasContext: canvas.getContext('2d'), viewport: vp }).promise;
+
+    const thumb = document.createElement('div');
+    thumb.className = 'thumb' + (i === currentPage ? ' active' : '');
+    thumb.appendChild(canvas);
+    const label = document.createElement('div');
+    label.className = 'thumb-label';
+    label.textContent = `Sayfa ${i}`;
+    thumb.appendChild(label);
+    const count = selections.filter(s => s.page === i).length;
+    if (count > 0) {
+      const badge = document.createElement('div');
+      badge.className = 'thumb-badge';
+      badge.textContent = count;
+      thumb.appendChild(badge);
+    }
+    thumb.addEventListener('click', () => { currentPage = i; renderPage(currentPage); });
+    container.appendChild(thumb);
+  }
+}
+
+// ── Page nav ──────────────────────────────────────────
+async function changePage(dir) {
+  const np = currentPage + dir;
+  if (np < 1 || np > pdfDoc.numPages) return;
+  currentPage = np;
+  await renderPage(currentPage);
+}
+
+// ── Zoom ──────────────────────────────────────────────
+async function setZoom(z) {
+  zoom = Math.max(0.4, Math.min(3.5, z));
+  document.getElementById('zoomVal').textContent = Math.round(zoom * 100) + '%';
+  if (pdfDoc) await renderPage(currentPage);
+}
+
+// ── Mouse selection ───────────────────────────────────
+const pageWrap = document.getElementById('pageWrap');
+const selRect = document.getElementById('selRect');
+
+pageWrap.addEventListener('mousedown', e => {
+  if (!pdfDoc) return;
+  isDragging = true;
+  pageWrapRect = pageWrap.getBoundingClientRect();
+  startX = e.clientX - pageWrapRect.left;
+  startY = e.clientY - pageWrapRect.top;
+  selRect.style.display = 'block';
+  selRect.style.left = startX + 'px';
+  selRect.style.top = startY + 'px';
+  selRect.style.width = '0';
+  selRect.style.height = '0';
+  e.preventDefault();
+});
+
+document.addEventListener('mousemove', e => {
+  if (!isDragging) return;
+  const x = e.clientX - pageWrapRect.left;
+  const y = e.clientY - pageWrapRect.top;
+  selRect.style.left = Math.min(x, startX) + 'px';
+  selRect.style.top = Math.min(y, startY) + 'px';
+  selRect.style.width = Math.abs(x - startX) + 'px';
+  selRect.style.height = Math.abs(y - startY) + 'px';
+});
+
+document.addEventListener('mouseup', async e => {
+  if (!isDragging) return;
+  isDragging = false;
+  selRect.style.display = 'none';
+  const x = e.clientX - pageWrapRect.left;
+  const y = e.clientY - pageWrapRect.top;
+  const rx = Math.min(x, startX);
+  const ry = Math.min(y, startY);
+  const rw = Math.abs(x - startX);
+  const rh = Math.abs(y - startY);
+  if (rw < 20 || rh < 10) return;
+  showLoading('Tablo okunuyor...');
+  const rows = await extractRegion(currentPage, rx, ry, rw, rh);
+  hideLoading();
+  if (!rows || rows.length === 0) {
+    toast('⚠️ Bu alanda veri bulunamadı'); return;
+  }
+  selCounter++;
+  const processed = postProcessRows(rows);
+  const sel = {
+    id: selCounter,
+    page: currentPage,
+    x: rx, y: ry, w: rw, h: rh,
+    rows: processed,
+    label: `S${currentPage}-#${selCounter}`
+  };
+  selections.push(sel);
+  drawSavedSel(sel);
+  renderSelList();
+  updateThumbBadges();
+  toast(`✅ ${processed.length} satır, ${processed[0].length} sütun`);
+  updateExportBtns();
+});
+
+// ── Core extraction with improved column detection ────────────────────
+async function extractRegion(pageNum, rx, ry, rw, rh) {
+  const page = await pdfDoc.getPage(pageNum);
+  const vp = page.getViewport({ scale: zoom });
+  const content = await page.getTextContent();
+
+  const vpNatural = page.getViewport({ scale: 1 });
+  const pageH = vpNatural.height;
+
+  const pdfX1 = rx / zoom;
+  const pdfY1 = ry / zoom;
+  const pdfX2 = (rx + rw) / zoom;
+  const pdfY2 = (ry + rh) / zoom;
+
+  const items = content.items.filter(item => {
+    const tx = item.transform[4];
+    const ty = item.transform[5];
+    const cx = tx;
+    const cy = pageH - ty;
+    return cx >= pdfX1 && cx <= pdfX2 && cy >= pdfY1 && cy <= pdfY2;
+  });
+
+  if (!items.length) return [];
+  return buildRowsFromItems(items, pageH, zoom);
+}
+
+// ── Full-page smart extraction ─────────────────────────────────────────
+async function extractFullPage(pageNum) {
+  const page = await pdfDoc.getPage(pageNum);
+  const vp = page.getViewport({ scale: zoom });
+  const content = await page.getTextContent();
+  const vpNatural = page.getViewport({ scale: 1 });
+  const pageH = vpNatural.height;
+
+  if (!content.items.length) return [];
+  return buildRowsFromItems(content.items, pageH, zoom);
+}
+
+// ── Shared row builder with advanced column alignment ─────────────────
+function buildRowsFromItems(items, pageH, scale) {
+  // Build raw item list with canvas coords
+  const rawItems = items.map(item => ({
+    x: item.transform[4],
+    y: Math.round((pageH - item.transform[5]) * 100) / 100,
+    text: item.str,
+    width: item.width || 0,
+    height: item.height || 10,
+    fontSize: Math.abs(item.transform[3]) || 10,
+  })).filter(i => i.text.trim());
+
+  if (!rawItems.length) return [];
+
+  // Cluster rows by Y proximity (adaptive tolerance based on font size)
+  const avgFontSize = rawItems.reduce((s, i) => s + i.fontSize, 0) / rawItems.length;
+  const rowTolerance = Math.max(avgFontSize * 0.6, 3);
+
+  const rowMap = {};
+  rawItems.forEach(item => {
+    const rowKey = Math.round(item.y / rowTolerance) * rowTolerance;
+    if (!rowMap[rowKey]) rowMap[rowKey] = [];
+    rowMap[rowKey].push(item);
+  });
+
+  const sortedYs = Object.keys(rowMap).map(Number).sort((a, b) => a - b);
+
+  // Detect column boundaries across ALL rows (global column alignment)
+  // This is the key improvement for bank statements
+  const allXPositions = [];
+  sortedYs.forEach(y => {
+    rowMap[y].sort((a, b) => a.x - b.x).forEach(item => {
+      allXPositions.push(item.x);
+    });
+  });
+
+  // Find column separators using gap analysis
+  const colBoundaries = detectColumnBoundaries(
+    sortedYs.map(y => rowMap[y].sort((a, b) => a.x - b.x))
+  );
+
+  // Build rows using column boundaries
+  const rows = sortedYs.map(y => {
+    const rowItems = rowMap[y].sort((a, b) => a.x - b.x);
+    return assignToColumns(rowItems, colBoundaries);
+  }).filter(r => r.some(c => c.trim()));
+
+  return rows;
+}
+
+// ── Detect column boundaries from all rows ───────────────────────────
+function detectColumnBoundaries(rowItemArrays) {
+  // Collect all X positions weighted by occurrence
+  const xHist = {};
+  rowItemArrays.forEach(rowItems => {
+    rowItems.forEach(item => {
+      const xBin = Math.round(item.x / 2) * 2; // 2-unit bins
+      xHist[xBin] = (xHist[xBin] || 0) + 1;
+    });
+  });
+
+  // Find consistent X positions (appear in many rows = column start)
+  const threshold = Math.max(2, rowItemArrays.length * 0.15);
+  const colStarts = Object.entries(xHist)
+    .filter(([x, cnt]) => cnt >= threshold)
+    .map(([x]) => parseFloat(x))
+    .sort((a, b) => a - b);
+
+  // Merge nearby column starts
+  const merged = [];
+  colStarts.forEach(x => {
+    if (!merged.length || x - merged[merged.length-1] > 8) {
+      merged.push(x);
+    } else {
+      // Average nearby positions
+      merged[merged.length-1] = (merged[merged.length-1] + x) / 2;
+    }
+  });
+
+  return merged;
+}
+
+// ── Assign items to detected columns ─────────────────────────────────
+function assignToColumns(rowItems, colBoundaries) {
+  if (!colBoundaries.length) {
+    // Fallback: gap-based column detection
+    return groupIntoColumns(rowItems);
+  }
+
+  // Create column slots
+  const cols = new Array(colBoundaries.length).fill('');
+
+  rowItems.forEach(item => {
+    // Find closest column boundary (within tolerance)
+    let bestCol = 0;
+    let bestDist = Infinity;
+    colBoundaries.forEach((boundary, i) => {
+      const dist = Math.abs(item.x - boundary);
+      if (dist < bestDist) {
+        bestDist = dist;
+        bestCol = i;
+      }
+    });
+
+    // Append to column (handle multi-word cells)
+    if (cols[bestCol]) {
+      // Check if it's a continuation (x is very close after last char) or new cell
+      cols[bestCol] += ' ' + item.text;
+    } else {
+      cols[bestCol] = item.text;
+    }
+  });
+
+  return cols.map(c => c.trim());
+}
+
+// ── Fallback column grouper ───────────────────────────────────────────
+function groupIntoColumns(items) {
+  if (!items.length) return [];
+  // Dynamic gap threshold based on average character width
+  const avgWidth = items.reduce((s, i) => s + (i.width || 0), 0) / items.length;
+  const gapThreshold = Math.max(avgWidth * 1.5, 6);
+
+  const cols = [];
+  let cur = items[0].text;
+  let lastX = items[0].x + (items[0].width || 0);
+
+  for (let i = 1; i < items.length; i++) {
+    const gap = items[i].x - lastX;
+    if (gap > gapThreshold) {
+      cols.push(cur.trim());
+      cur = items[i].text;
+    } else {
+      cur += ' ' + items[i].text;
+    }
+    lastX = items[i].x + (items[i].width || 0);
+  }
+  cols.push(cur.trim());
+  return cols.filter((c, i) => i === 0 || c.trim());
+}
+
+// ── Post-processing for Turkish bank data ───────────────────────────
+function postProcessRows(rows) {
+  if (!rows || !rows.length) return rows;
+
+  return rows.map((row, rowIdx) => {
+    return row.map((cell, colIdx) => {
+      let val = (cell || '').trim();
+
+      // Skip empty
+      if (!val) return val;
+
+      // Trim option
+      if (bankOpts.trim) {
+        val = val.replace(/\s+/g, ' ').trim();
+      }
+
+      // Fix Turkish number formats: 1.234,56 → keep as string for Excel
+      if (bankOpts.numbers) {
+        val = fixTurkishNumber(val);
+      }
+
+      // Fix Turkish date formats
+      if (bankOpts.dates) {
+        val = fixTurkishDate(val);
+      }
+
+      return val;
+    });
+  });
+}
+
+function fixTurkishNumber(val) {
+  // Match Turkish currency: 1.234,56 or -1.234,56 or 1.234,56 TL
+  const trNumRegex = /^-?[\d]{1,3}(?:\.[\d]{3})*(?:,[\d]{2})?(\s*(TL|₺|EUR|USD|\$|€))?$/;
+  const cleaned = val.replace(/\s/g, '');
+  if (trNumRegex.test(cleaned)) {
+    // Remove thousand separator dots, keep as text for proper Excel handling
+    // Return cleaned version — Excel will auto-detect
+    return val.replace(/(\d)\.(\d{3})/g, '$1$2').replace(',', '.');
+  }
+  return val;
+}
+
+function fixTurkishDate(val) {
+  // DD.MM.YYYY or DD/MM/YYYY or DD-MM-YYYY
+  const dateRegex = /^(\d{2})[.\/-](\d{2})[.\/-](\d{4})$/;
+  const match = val.match(dateRegex);
+  if (match) {
+    // Return as DD.MM.YYYY (standard Turkish)
+    return `${match[1]}.${match[2]}.${match[3]}`;
+  }
+  return val;
+}
+
+// ── Smart Bank Mode ────────────────────────────────────────────────────
+async function smartBankExtract() {
+  showLoading('Akıllı banka taraması...', true);
+  selections = selections.filter(s => false);
+  selCounter = 0;
+
+  for (let p = 1; p <= pdfDoc.numPages; p++) {
+    setLoadingText(`Sayfa ${p}/${pdfDoc.numPages} analiz ediliyor...`);
+    setProgress(((p-1) / pdfDoc.numPages) * 100);
+
+    const rows = await extractFullPage(p);
+    if (!rows || rows.length < 2) continue;
+
+    // Bank-specific filtering: detect table rows (rows with multiple columns)
+    const tableRows = filterBankTableRows(rows, currentBank);
+
+    if (tableRows.length > 1) {
+      const processed = postProcessRows(tableRows);
+      selCounter++;
+      selections.push({
+        id: selCounter,
+        page: p,
+        x: 0, y: 0,
+        w: document.getElementById('pdfCanvas').width,
+        h: document.getElementById('pdfCanvas').height,
+        rows: processed,
+        label: `Sayfa ${p}`,
+        smart: true
+      });
+    }
+  }
+
+  setProgress(100);
+  await renderPage(currentPage);
+  renderSelList();
+  updateThumbBadges();
+  updateExportBtns();
+  hideLoading();
+
+  if (selections.length > 0) {
+    toast(`✅ ${selections.length} sayfa işlendi — ${selections.reduce((s,sel) => s + sel.rows.length, 0)} satır bulundu`);
+  } else {
+    toast('⚠️ Tablo verisi tespit edilemedi. Manuel seçim deneyin.');
+  }
+}
+
+// ── Filter rows to keep only data table rows ──────────────────────────
+function filterBankTableRows(rows, bankProfile) {
+  if (!rows.length) return rows;
+
+  // Find max column count (likely the data rows)
+  const colCounts = rows.map(r => r.filter(c => c.trim()).length);
+  const maxCols = Math.max(...colCounts);
+
+  if (maxCols < 2) return rows; // Not a table
+
+  // Keep rows that have enough columns (at least 40% of max)
+  const minCols = Math.max(2, Math.floor(maxCols * 0.4));
+
+  // Also keep header rows (first non-empty rows)
+  let headersDone = false;
+  const result = [];
+
+  for (let i = 0; i < rows.length; i++) {
+    const filledCols = rows[i].filter(c => c.trim()).length;
+    if (!headersDone && filledCols >= 1) {
+      result.push(rows[i]);
+      if (filledCols >= minCols) headersDone = true;
+    } else if (headersDone && filledCols >= minCols) {
+      result.push(rows[i]);
+    }
+  }
+
+  // Remove duplicate/header repetition (common in multi-page bank statements)
+  const seen = new Set();
+  return result.filter(row => {
+    const key = row.join('|').toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+// ── Auto extract all (standard mode) ────────────────────────────────
+async function autoExtractAll() {
+  showLoading('Tüm sayfalar taranıyor...', true);
+  selections = [];
+  selCounter = 0;
+
+  for (let p = 1; p <= pdfDoc.numPages; p++) {
+    setLoadingText(`Sayfa ${p}/${pdfDoc.numPages} taranıyor...`);
+    setProgress(((p-1) / pdfDoc.numPages) * 100);
+
+    const page = await pdfDoc.getPage(p);
+    const vp = page.getViewport({ scale: zoom });
+    const rows = await extractRegion(p, 0, 0, vp.width, vp.height);
+    if (rows.length > 1) {
+      selCounter++;
+      selections.push({
+        id: selCounter,
+        page: p,
+        x: 0, y: 0, w: vp.width, h: vp.height,
+        rows: postProcessRows(rows),
+        label: `Sayfa ${p}`
+      });
+    }
+  }
+
+  setProgress(100);
+  await renderPage(currentPage);
+  renderSelList();
+  updateThumbBadges();
+  updateExportBtns();
+  hideLoading();
+  toast(`✅ ${selections.length} sayfa çıkarıldı`);
+}
+
+// ── Selection list UI ─────────────────────────────────────────────────
+function renderSelList() {
+  const container = document.getElementById('selList');
+  if (!selections.length) {
+    container.innerHTML = `<div class="no-sels"><div class="no-sels-icon">🖱</div>Tablo alanını fareyle seç,<br>veya <strong style="color:var(--warn)">Akıllı Banka Modu</strong>'nu kullan.</div>`;
+    return;
+  }
+
+  container.innerHTML = '<div class="sel-list">' + selections.map(s => {
+    const preview = s.rows.slice(0, 3).map(r => r.slice(0, 4).join(' │ ')).join('\n');
+    const smartBadge = s.smart ? `<div class="detect-badge">⚡ Akıllı</div>` : '';
+    return `
+      <div class="sel-item">
+        <div class="sel-item-head">
+          <div class="sel-item-title">${s.label}</div>
+          <button class="sel-item-del" onclick="deleteSel(${s.id})">✕</button>
+        </div>
+        <div class="sel-item-meta">
+          📄 Sayfa ${s.page} &nbsp;·&nbsp; ${s.rows.length} satır &nbsp;·&nbsp; ${Math.max(...s.rows.map(r=>r.length))} sütun
+        </div>
+        ${smartBadge}
+        <div class="sel-preview">${preview}</div>
+      </div>`;
+  }).join('') + '</div>';
+
+  document.getElementById('statusSels').style.display = 'flex';
+  document.getElementById('statusSelsText').textContent = `${selections.length} seçim — ${selections.reduce((s,sel) => s + sel.rows.length, 0)} satır`;
+}
+
+function deleteSel(id) {
+  selections = selections.filter(s => s.id !== id);
+  document.querySelectorAll(`.saved-sel[data-id="${id}"]`).forEach(e => e.remove());
+  renderSelList();
+  updateThumbBadges();
+  updateExportBtns();
+  if (!selections.length) document.getElementById('statusSels').style.display = 'none';
+}
+
+function clearAllSels() {
+  selections = [];
+  document.querySelectorAll('.saved-sel').forEach(e => e.remove());
+  renderSelList();
+  updateThumbBadges();
+  updateExportBtns();
+  document.getElementById('statusSels').style.display = 'none';
+}
+
+function updateThumbBadges() {
+  document.querySelectorAll('.thumb').forEach((t, i) => {
+    const existing = t.querySelector('.thumb-badge');
+    if (existing) existing.remove();
+    const count = selections.filter(s => s.page === i + 1).length;
+    if (count > 0) {
+      const badge = document.createElement('div');
+      badge.className = 'thumb-badge';
+      badge.textContent = count;
+      t.appendChild(badge);
+    }
+  });
+}
+
+// ── Export ────────────────────────────────────────────────────────────
+function exportFile(type) {
+  if (!selections.length) return;
+  const pageSels = selections.filter(s => s.page === currentPage);
+  const toExport = pageSels.length ? pageSels : [selections[0]];
+  doExport(toExport, type, `sayfa${currentPage}`);
+}
+
+function exportAll() {
+  if (!selections.length) return;
+  doExport(selections, 'xlsx', 'banka_ekstresi_' + formatDateForFile());
+}
+
+function formatDateForFile() {
+  const d = new Date();
+  return `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}`;
+}
+
+function doExport(sels, type, baseName) {
+  const wb = XLSX.utils.book_new();
+
+  // Group by page for separate sheets
+  const byPage = {};
+  sels.forEach(s => {
+    if (!byPage[s.page]) byPage[s.page] = [];
+    byPage[s.page].push(s);
+  });
+
+  Object.entries(byPage).forEach(([page, pageSels]) => {
+    const combined = [];
+
+    pageSels.forEach((s, idx) => {
+      if (idx > 0) combined.push([]);
+      s.rows.forEach(r => combined.push([...r]));
+    });
+
+    // Normalize columns
+    const maxCols = Math.max(...combined.map(r => r.length));
+    const norm = combined.map(r => {
+      while (r.length < maxCols) r.push('');
+      return r;
+    });
+
+    const ws = XLSX.utils.aoa_to_sheet(norm);
+
+    // Apply header row styling if opted in
+    if (bankOpts.header && norm.length > 0) {
+      // Mark first row as bold via cell styles (xlsx lite doesn't support full styles, skip)
+    }
+
+    // Smart column widths
+    const widths = [];
+    norm.forEach(row => row.forEach((cell, ci) => {
+      const l = String(cell || '').length;
+      if (!widths[ci] || l > widths[ci]) widths[ci] = l;
+    }));
+    ws['!cols'] = widths.map(w => ({ wch: Math.min(Math.max((w || 6) + 2, 8), 50) }));
+
+    // Freeze first row if header mode
+    if (bankOpts.header) {
+      ws['!freeze'] = { xSplit: 0, ySplit: 1 };
+    }
+
+    const sheetName = `Sayfa ${page}`.slice(0, 31);
+    XLSX.utils.book_append_sheet(wb, ws, sheetName);
+  });
+
+  // Add metadata sheet
+  const metaWs = XLSX.utils.aoa_to_sheet([
+    ['PDF→XLS PRO — Mali Müşavirlik Sürümü'],
+    [''],
+    ['Geliştirici:', 'Levent Emirhan Özhan'],
+    ['Dışa Aktarım:', new Date().toLocaleString('tr-TR')],
+    ['Banka Profili:', document.getElementById('bankSelect').options[document.getElementById('bankSelect').selectedIndex].text],
+    ['Toplam Sayfa:', Object.keys(byPage).length],
+    ['Toplam Satır:', sels.reduce((s, sel) => s + sel.rows.length, 0)],
+  ]);
+  metaWs['!cols'] = [{wch: 20}, {wch: 30}];
+  XLSX.utils.book_append_sheet(wb, metaWs, 'Bilgi');
+
+  if (type === 'csv') {
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    const csv = XLSX.utils.sheet_to_csv(ws);
+    const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = baseName + '.csv';
+    a.click();
+  } else {
+    XLSX.writeFile(wb, baseName + '.xlsx');
+  }
+
+  toast(`✅ ${baseName}.${type} indirildi`);
+}
+
+// ── UI helpers ────────────────────────────────────────────────────────
+function updateUI() {
+  const loaded = !!pdfDoc;
+  document.getElementById('btnAutoAll').disabled = !loaded;
+  document.getElementById('btnSmartBank').disabled = !loaded;
+  document.getElementById('btnPrev').disabled = !loaded || currentPage <= 1;
+  document.getElementById('btnNext').disabled = !loaded || currentPage >= (pdfDoc?.numPages || 1);
+}
+
+function updateExportBtns() {
+  const has = selections.length > 0;
+  document.getElementById('expXlsx').disabled = !has;
+  document.getElementById('expCsv').disabled = !has;
+  document.getElementById('expAll').disabled = !has;
+}
+
+function setStatus(color, text) {
+  const dot = document.getElementById('statusDot');
+  dot.className = 'status-dot' + (color ? ' ' + color : '');
+  document.getElementById('statusText').textContent = text;
+}
+
+function showLoading(text, showProgress) {
+  document.getElementById('loadingText').textContent = text;
+  document.getElementById('loadingSub').textContent = '';
+  document.getElementById('loading').style.display = 'flex';
+  const pw = document.getElementById('progressWrap');
+  pw.style.display = showProgress ? 'block' : 'none';
+  if (showProgress) document.getElementById('progressFill').style.width = '0%';
+}
+function setLoadingText(text) {
+  document.getElementById('loadingText').textContent = text;
+}
+function setProgress(pct) {
+  document.getElementById('progressFill').style.width = pct + '%';
+}
+function hideLoading() {
+  document.getElementById('loading').style.display = 'none';
+}
+
+function toast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 3200);
+}
+
+function showAbout() {
+  document.getElementById('aboutModal').classList.add('show');
+}
+function hideAbout() {
+  document.getElementById('aboutModal').classList.remove('show');
+}
+</script>
+</body>
+</html>

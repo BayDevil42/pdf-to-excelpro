@@ -1,0 +1,53 @@
+name: Build Windows EXE
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:   # Elle de tetiklenebilir
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Kodu indir
+        uses: actions/checkout@v4
+
+      - name: Python 3.11 kur
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Bağımlılıkları yükle
+        run: |
+          pip install pywebview pyinstaller
+
+      - name: EXE oluştur
+        run: |
+          pyinstaller app.spec
+
+      - name: EXE'yi Artifacts'e yükle
+        uses: actions/upload-artifact@v4
+        with:
+          name: PdfExcelPro-Windows
+          path: dist/PdfExcelPro.exe
+          retention-days: 90
+
+      - name: Release oluştur (otomatik versiyon)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ github.run_number }}
+          name: "PDF Excel Pro v${{ github.run_number }}"
+          body: |
+            ## PDF → Excel Pro
+            **Levent Emirhan Özhan tarafından geliştirilmiştir.**
+
+            ### Kurulum
+            `PdfExcelPro.exe` dosyasını indirin, çift tıklayın — bitti.
+            Başka hiçbir şey kurmaya gerek yok.
+
+            ### Değişiklikler
+            ${{ github.event.head_commit.message }}
+          files: dist/PdfExcelPro.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
