@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>PDF → Excel Pro | Mali Müşavirlik Araçları</title>
+<title>PDF → Excel Pro | Talvixa</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <style>
@@ -570,6 +570,26 @@ body {
   font-size: 9px;
   color: var(--muted);
   opacity: 0.5;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.footer-link {
+  color: var(--accent);
+  text-decoration: none;
+  cursor: pointer;
+  font-weight: 600;
+  opacity: 1;
+  transition: color 0.15s;
+}
+.footer-link:hover {
+  color: #00fbb3;
+  text-decoration: underline;
+}
+.footer-sep {
+  width: 1px;
+  height: 10px;
+  background: var(--border2);
 }
 
 /* Zoom controls */
@@ -793,6 +813,8 @@ body {
   <div class="logo">
     <div class="logo-icon">⬡</div>
     PDF→XLS <span style="color:var(--muted);font-size:11px;font-weight:400">PRO</span>
+    <span style="color:var(--border2);font-weight:400">|</span>
+    <span style="color:var(--accent);font-weight:600">Talvixa</span>
   </div>
   <div class="topbar-sep"></div>
   <button class="btn btn-ghost" onclick="document.getElementById('fileInput').click()">
@@ -923,7 +945,11 @@ body {
     <div class="status-dot blue"></div>
     <span id="statusSelsText">0 seçim</span>
   </div>
-  <div class="status-right">Levent Emirhan Özhan tarafından geliştirilmiştir</div>
+  <div class="status-right">
+    <span>Levent Emirhan Özhan tarafından geliştirilmiştir</span>
+    <div class="footer-sep"></div>
+    <a class="footer-link" id="talvixaLink" onclick="openTalvixa(); return false;" href="https://talvixa.com">talvixa.com</a>
+  </div>
 </div>
 
 <!-- Loading -->
@@ -954,6 +980,10 @@ body {
       <div class="modal-val accent">Levent Emirhan Özhan</div>
     </div>
     <div class="modal-row">
+      <div class="modal-label">Marka</div>
+      <div class="modal-val">Talvixa</div>
+    </div>
+    <div class="modal-row">
       <div class="modal-label">Amaç</div>
       <div class="modal-val">Mali Müşavirlik Bürosu</div>
     </div>
@@ -972,6 +1002,12 @@ body {
 
     <div style="font-size:10px;color:var(--muted);font-family:var(--mono);line-height:1.7">
       PDF.js 3.11 &nbsp;·&nbsp; SheetJS 0.18 &nbsp;·&nbsp; Yerel işlem (sunucu yok)
+    </div>
+
+    <div class="modal-divider"></div>
+
+    <div style="font-size:11px;font-family:var(--mono);text-align:center">
+      <a class="footer-link" onclick="openTalvixa(); return false;" href="https://talvixa.com">talvixa.com</a>
     </div>
 
     <button class="modal-close" onclick="hideAbout()">Kapat</button>
@@ -1670,6 +1706,7 @@ function doExport(sels, type, baseName) {
   // Add metadata sheet
   const metaWs = XLSX.utils.aoa_to_sheet([
     ['PDF→XLS PRO — Mali Müşavirlik Sürümü'],
+    ['Talvixa'],
     [''],
     ['Geliştirici:', 'Levent Emirhan Özhan'],
     ['Dışa Aktarım:', new Date().toLocaleString('tr-TR')],
@@ -1682,17 +1719,67 @@ function doExport(sels, type, baseName) {
 
   if (type === 'csv') {
     const ws = wb.Sheets[wb.SheetNames[0]];
-    const csv = XLSX.utils.sheet_to_csv(ws);
-    const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = baseName + '.csv';
-    a.click();
+    const csv = '\ufeff' + XLSX.utils.sheet_to_csv(ws);
+    const base64 = b64EncodeUnicode(csv);
+    saveFileToDisk(baseName + '.csv', base64, 'csv');
   } else {
-    XLSX.writeFile(wb, baseName + '.xlsx');
+    const base64 = XLSX.write(wb, { bookType: 'xlsx', type: 'base64' });
+    saveFileToDisk(baseName + '.xlsx', base64, 'xlsx');
+  }
+}
+
+// UTF-8 safe base64 encoding (handles Turkish characters in CSV)
+function b64EncodeUnicode(str) {
+  return btoa(unescape(encodeURIComponent(str)));
+}
+
+// Save a base64 payload to disk. Uses pywebview's native save dialog
+// when running inside the desktop app, falls back to a browser
+// download if opened in a regular web browser.
+function saveFileToDisk(filename, base64data, kind) {
+  if (window.pywebview && window.pywebview.api && window.pywebview.api.save_file) {
+    window.pywebview.api.save_file(filename, base64data).then(res => {
+      if (res && res.success) {
+        toast(`✅ ${filename} kaydedildi`);
+      } else if (res && res.cancelled) {
+        toast('Kaydetme işlemi iptal edildi');
+      } else {
+        toast('❌ Kaydetme hatası: ' + (res && res.message ? res.message : 'bilinmeyen hata'));
+      }
+    }).catch(err => {
+      console.error(err);
+      toast('❌ Kaydetme hatası');
+    });
+    return;
   }
 
-  toast(`✅ ${baseName}.${type} indirildi`);
+  // Fallback (regular browser): trigger a normal download
+  const byteChars = atob(base64data);
+  const bytes = new Uint8Array(byteChars.length);
+  for (let i = 0; i < byteChars.length; i++) bytes[i] = byteChars.charCodeAt(i);
+  const mime = kind === 'csv'
+    ? 'text/csv;charset=utf-8'
+    : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+  const blob = new Blob([bytes], { type: mime });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  toast(`✅ ${filename} indirildi`);
+}
+
+// Open the Talvixa website. Uses the desktop app's system browser
+// bridge when available, falls back to a normal new tab.
+function openTalvixa() {
+  const url = 'https://talvixa.com';
+  if (window.pywebview && window.pywebview.api && window.pywebview.api.open_link) {
+    window.pywebview.api.open_link(url);
+  } else {
+    window.open(url, '_blank');
+  }
 }
 
 // ── UI helpers ────────────────────────────────────────────────────────
