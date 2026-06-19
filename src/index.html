@@ -1457,7 +1457,15 @@ function findHeaderRowAnchors(sortedYs, rowMap, profile) {
     const rowText = rowItems.map(i => i.text.toLowerCase()).join(' ');
     const matches = profile.headerHints.filter(h => rowText.includes(h));
     if (matches.length >= Math.ceil(profile.headerHints.length * 0.6)) {
-      const merged = mergeNearbyPositions(rowItems.map(i => i.x), 30);
+      // Prefer anchoring directly on each canonical column name's word
+      // position — this survives adjacent header labels (e.g. "İşlem
+      // Tutarı" / "Güncel Bakiye") sitting close enough together that a
+      // distance-based merge would otherwise collapse them into one column.
+      if (profile.columns) {
+        const named = anchorsFromColumnNames(rowItems, profile.columns);
+        if (named) return named;
+      }
+      const merged = mergeNearbyPositions(rowItems.map(i => i.x), 18);
       if (profile.columns && merged.length === profile.columns.length) {
         return merged;
       }
@@ -1465,6 +1473,52 @@ function findHeaderRowAnchors(sortedYs, rowMap, profile) {
     }
   }
   return null;
+}
+
+// ── Map each canonical column name to the x-position of its matching word
+//    in the header row, instead of relying on distance-based clustering ──
+function anchorsFromColumnNames(rowItems, columns) {
+  // Split multi-word header items (e.g. one PDF text run "İşlem Tutarı")
+  // into per-word x estimates, distributing width evenly across characters.
+  const words = [];
+  rowItems.forEach(item => {
+    const parts = item.text.split(/\s+/).filter(Boolean);
+    if (parts.length <= 1) {
+      words.push({ text: item.text.toLowerCase(), x: item.x });
+      return;
+    }
+    const totalChars = item.text.length || 1;
+    const charW = (item.width || totalChars * 5) / totalChars;
+    let offset = 0;
+    parts.forEach(p => {
+      words.push({ text: p.toLowerCase(), x: item.x + offset });
+      offset += (p.length + 1) * charW;
+    });
+  });
+
+  const norm = s => s.toLowerCase().replace(/[^a-zçğıöşü0-9]/gi, '');
+  const anchors = [];
+  // `words` is already left-to-right (built from x-sorted rowItems), and so
+  // are `columns` — search forward from the last match so repeated leading
+  // words across columns (e.g. "İşlem No" / "İşlem Adı" both starting with
+  // "işlem") still resolve to distinct positions instead of the same one.
+  let searchFrom = 0;
+  for (const col of columns) {
+    const firstWord = norm(col.split(/\s+/)[0]);
+    if (!firstWord) return null;
+    let hitIdx = -1;
+    for (let i = searchFrom; i < words.length; i++) {
+      if (norm(words[i].text).startsWith(firstWord)) { hitIdx = i; break; }
+    }
+    if (hitIdx === -1) return null; // couldn't place this column — bail to fallback
+    anchors.push(words[hitIdx].x);
+    searchFrom = hitIdx + 1;
+  }
+  // Anchors must be strictly ascending and distinct enough to be usable.
+  for (let i = 1; i < anchors.length; i++) {
+    if (anchors[i] <= anchors[i - 1] + 2) return null;
+  }
+  return anchors;
 }
 
 function mergeNearbyPositions(xs, tolerance) {
@@ -1605,6 +1659,53 @@ function normalizeToProfileColumns(rows, profile) {
   return [profile.columns.slice(), ...fixed];
 }
 
+// ── Drop the customer/account info block printed above the transaction
+//    table (e.g. "Hesap Hareketleri", müşteri adı, IBAN, şube...) — the
+//    user only wants the table itself in the export. Locates the table's
+//    header row via the profile's headerHints and discards everything
+//    before and including it (normalizeToProfileColumns re-adds its own
+//    canonical header afterwards).
+function dropPreambleRows(rows, profile) {
+  if (!profile || !profile.headerHints) return rows;
+  for (let i = 0; i < rows.length; i++) {
+    const rowText = rows[i].join(' ').toLowerCase();
+    const matches = profile.headerHints.filter(h => rowText.includes(h));
+    if (matches.length >= Math.ceil(profile.headerHints.length * 0.6)) {
+      return rows.slice(i + 1);
+    }
+  }
+  return rows;
+}
+
+// ── Safety net: split a cell that still holds two adjacent Turkish
+//    amounts glued together (e.g. "39.128,02 483.059,69") into the two
+//    separate amount columns the profile expects. Covers cases where the
+//    header anchors line up correctly but a body row's own numbers still
+//    land closer to one shared boundary than the other.
+function splitCombinedAmountCells(rows, profile) {
+  if (!profile || !profile.amountColumns || profile.amountColumns.length < 2) return rows;
+  const numTok = '-?\\d{1,3}(?:\\.\\d{3})*,\\d{2}';
+  const dual = new RegExp('^(' + numTok + ')\\s+(' + numTok + ')$');
+  return rows.map((row, idx) => {
+    if (idx === 0) return row; // header row, leave untouched
+    const out = row.slice();
+    for (let i = 0; i < profile.amountColumns.length - 1; i++) {
+      const c1 = profile.amountColumns[i];
+      const c2 = profile.amountColumns[i + 1];
+      if (c2 !== c1 + 1) continue;
+      const cell = (out[c1] || '').trim();
+      if (cell && !(out[c2] || '').trim()) {
+        const m = cell.match(dual);
+        if (m) {
+          out[c1] = m[1];
+          out[c2] = m[2];
+        }
+      }
+    }
+    return out;
+  });
+}
+
 // ── Apply number/date formatting only to the columns the profile marks
 //    as amount/date columns, skipping the header row ───────────────────
 function applyProfileFormatting(rows, profile) {
@@ -1658,16 +1759,26 @@ async function smartBankExtract() {
     setLoadingText(`Sayfa ${p}/${pdfDoc.numPages} analiz ediliyor...`);
     setProgress(((p-1) / pdfDoc.numPages) * 100);
 
-    const rows = await extractFullPage(p);
-    if (!rows || rows.length < 2) continue;
+    const profile = getActiveProfile();
+    const rawRows = await extractFullPage(p);
+    if (!rawRows || rawRows.length < 2) continue;
+
+    // Strip the customer/account info block above the table before the
+    // generic column-density filter runs, so it never leaks into the export.
+    const rows = dropPreambleRows(rawRows, profile);
 
     // Bank-specific filtering: detect table rows (rows with multiple columns)
     const tableRows = filterBankTableRows(rows, currentBank);
 
     if (tableRows.length > 1) {
-      const profile = getActiveProfile();
       const processed = (profile && profile.columns)
-        ? applyProfileFormatting(normalizeToProfileColumns(mergeWrappedRows(tableRows, profile), profile), profile)
+        ? applyProfileFormatting(
+            splitCombinedAmountCells(
+              normalizeToProfileColumns(mergeWrappedRows(tableRows, profile), profile),
+              profile
+            ),
+            profile
+          )
         : postProcessRows(tableRows);
       selCounter++;
       selections.push({
