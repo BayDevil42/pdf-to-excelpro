@@ -1054,15 +1054,42 @@ const BANK_PROFILES = {
     columns: ['İşlem Tarihi', 'Referans Kodu', 'Açıklama', 'Tutar', 'Bakiye'],
     dateColumns: [0], amountColumns: [3, 4], continuationCol: 2
   },
-  // Other banks (ziraat, isbank, garanti, akbank, vakif, yapikredi,
-  // denizbank, enpara) keep using the generic algorithm until sample
-  // statements are available to fill in detect/headerHints/columns.
-  ziraat: { name: 'Ziraat Bankası', detect: null, headerHints: null, columns: null },
-  isbank: { name: 'İş Bankası', detect: null, headerHints: null, columns: null },
-  garanti: { name: 'Garanti BBVA', detect: null, headerHints: null, columns: null },
+  ziraat: {
+    name: 'Ziraat Bankası',
+    detect: { ibanPrefix: ['tr1800209', 'tr180020'], textHints: ['ziraat mobil', 'ziraat bankası'] },
+    headerHints: ['tarih', 'açıklama', 'tutar', 'bakiye'],
+    columns: ['Tarih', 'Açıklama', 'Tutar', 'Bakiye'],
+    dateColumns: [0], amountColumns: [2, 3], continuationCol: 1
+  },
+  isbank: {
+    name: 'İş Bankası',
+    detect: { ibanPrefix: ['tr8400064', 'tr840006'], textHints: ['türkiye iş bankası', 'işcep', 'hesap özeti'] },
+    headerHints: ['tarih/saat', 'kanal/şube', 'işlem tutarı', 'bakiye', 'ek hesap', 'işlem tipi', 'açıklama'],
+    columns: ['Tarih/Saat', 'Kanal/Şube', 'İşlem Tutarı', 'Bakiye', 'Ek Hesap Bakiyesi', 'İşlem', 'İşlem Tipi', 'Açıklama'],
+    dateColumns: [0], amountColumns: [2, 3, 4], continuationCol: 7
+  },
+  garanti: {
+    name: 'Garanti BBVA',
+    detect: { ibanPrefix: ['tr9600062', 'tr960006'], textHints: ['garanti bbva', 't.garanti bankası', 'hesap hareketleri bilgileri'] },
+    headerHints: ['tarih', 'açıklama', 'etiket', 'tutar', 'bakiye'],
+    columns: ['Tarih', 'Açıklama', 'Etiket', 'Tutar', 'Bakiye'],
+    dateColumns: [0], amountColumns: [3, 4], continuationCol: 1
+  },
   akbank: { name: 'Akbank', detect: null, headerHints: null, columns: null },
-  vakif: { name: 'VakıfBank', detect: null, headerHints: null, columns: null },
-  yapikredi: { name: 'Yapı Kredi', detect: null, headerHints: null, columns: null },
+  vakif: {
+    name: 'VakıfBank',
+    detect: { ibanPrefix: ['tr8500015', 'tr850001'], textHints: ['vakıfbank', 'vakif bankasi'] },
+    headerHints: ['tarih', 'saat', 'işlem no', 'miktar', 'bakiye', 'işlem adı'],
+    columns: ['Tarih', 'Saat', 'İşlem No', 'Miktar', 'Bakiye', 'İşlem Adı'],
+    dateColumns: [0], amountColumns: [3, 4], continuationCol: 5
+  },
+  yapikredi: {
+    name: 'Yapı Kredi',
+    detect: { ibanPrefix: ['tr420006701', 'tr420006'], textHints: ['yapıkredi', 'yapı kredi', 'hesap özeti'] },
+    headerHints: ['tarih', 'valör tarihi', 'açıklama', 'işlem tutarı', 'güncel bakiye'],
+    columns: ['Tarih', 'Valör Tarihi', 'Açıklama', 'İşlem Tutarı', 'Güncel Bakiye'],
+    dateColumns: [0, 1], amountColumns: [3, 4], continuationCol: 2
+  },
   denizbank: { name: 'Denizbank', detect: null, headerHints: null, columns: null },
   enpara: { name: 'Enpara / QNB', detect: null, headerHints: null, columns: null },
   generic: { name: 'Genel', detect: null, headerHints: null, columns: null }
