@@ -1032,12 +1032,80 @@ let pageWrapRect = null;
 let bankOpts = { trim: true, numbers: true, dates: true, header: false };
 let currentBank = 'generic';
 
+// ── Bank profile definitions ───────────────────────────────────────────
+// Each profile carries detection hints (IBAN bank-code prefix + text
+// keywords found on statement PDFs), the keywords used to recognize the
+// table header row, and the canonical column schema to export to.
+// Profiles with detect/headerHints set to null fall back to the generic
+// position-based algorithm untouched — new banks can be added later by
+// filling in the same shape.
+const BANK_PROFILES = {
+  halkbank: {
+    name: 'Halkbank',
+    detect: { ibanPrefix: ['tr230012', 'tr0012'], textHints: ['halk bankası', 'halkbank', 'cüzdan bilgileri', 'cüzdan seri no'] },
+    headerHints: ['işlem tarihi', 'açıklama', 'işlem tutarı', 'bakiye'],
+    columns: ['İşlem Tarihi', 'Açıklama', 'İşlem Tutarı', 'Bakiye'],
+    dateColumns: [0], amountColumns: [2, 3], continuationCol: 1
+  },
+  kuveytturk: {
+    name: 'Kuveyt Türk',
+    detect: { ibanPrefix: ['tr580020', 'tr0020'], textHints: ['kuveyt türk', 'kuveytturk', 'hesap özeti', 'devir bakiyesi'] },
+    headerHints: ['işlem tarihi', 'referans kodu', 'açıklama', 'tutar', 'bakiye'],
+    columns: ['İşlem Tarihi', 'Referans Kodu', 'Açıklama', 'Tutar', 'Bakiye'],
+    dateColumns: [0], amountColumns: [3, 4], continuationCol: 2
+  },
+  // Other banks (ziraat, isbank, garanti, akbank, vakif, yapikredi,
+  // denizbank, enpara) keep using the generic algorithm until sample
+  // statements are available to fill in detect/headerHints/columns.
+  ziraat: { name: 'Ziraat Bankası', detect: null, headerHints: null, columns: null },
+  isbank: { name: 'İş Bankası', detect: null, headerHints: null, columns: null },
+  garanti: { name: 'Garanti BBVA', detect: null, headerHints: null, columns: null },
+  akbank: { name: 'Akbank', detect: null, headerHints: null, columns: null },
+  vakif: { name: 'VakıfBank', detect: null, headerHints: null, columns: null },
+  yapikredi: { name: 'Yapı Kredi', detect: null, headerHints: null, columns: null },
+  denizbank: { name: 'Denizbank', detect: null, headerHints: null, columns: null },
+  enpara: { name: 'Enpara / QNB', detect: null, headerHints: null, columns: null },
+  generic: { name: 'Genel', detect: null, headerHints: null, columns: null }
+};
+
+function getActiveProfile() {
+  return BANK_PROFILES[currentBank] || null;
+}
+
 function toggleOpt(el, key) {
   bankOpts[key] = !bankOpts[key];
   el.classList.toggle('active', bankOpts[key]);
 }
 function bankProfileChanged() {
   currentBank = document.getElementById('bankSelect').value;
+}
+
+// Scan the first page's text for known bank keywords/IBAN prefixes and
+// pre-select the matching profile. Manual dropdown selection still works
+// as an override afterwards.
+async function detectBankProfile(doc) {
+  try {
+    const page = await doc.getPage(1);
+    const content = await page.getTextContent();
+    const text = content.items.map(i => i.str).join(' ').toLowerCase();
+    for (const [key, profile] of Object.entries(BANK_PROFILES)) {
+      if (!profile.detect) continue;
+      const hints = profile.detect.textHints || [];
+      const ibanPrefixes = profile.detect.ibanPrefix || [];
+      const hintMatch = hints.some(h => text.includes(h));
+      const ibanMatch = ibanPrefixes.some(p => text.includes(p));
+      if (hintMatch || ibanMatch) {
+        currentBank = key;
+        const sel = document.getElementById('bankSelect');
+        if (sel) sel.value = key;
+        toast(`🔎 ${profile.name} tespit edildi`);
+        return key;
+      }
+    }
+  } catch (e) {
+    // Detection is best-effort; keep generic profile on failure.
+  }
+  return null;
 }
 
 // ── File loading ──────────────────────────────────────
@@ -1071,6 +1139,8 @@ async function loadPDF(file) {
     currentPage = 1;
     selections = [];
     selCounter = 0;
+    currentBank = 'generic';
+    await detectBankProfile(pdfDoc);
     await renderPage(currentPage);
     await buildThumbs();
     updateUI();
@@ -1299,8 +1369,14 @@ function buildRowsFromItems(items, pageH, scale) {
     });
   });
 
-  // Find column separators using gap analysis
-  const colBoundaries = detectColumnBoundaries(
+  // If the active bank profile's header row can be located, use its word
+  // x-positions as column anchors — far more reliable than frequency-based
+  // detection for statements with wrapped descriptions or sparse columns.
+  const activeProfile = getActiveProfile();
+  const headerAnchors = findHeaderRowAnchors(sortedYs, rowMap, activeProfile);
+
+  // Find column separators using gap analysis (fallback)
+  const colBoundaries = headerAnchors || detectColumnBoundaries(
     sortedYs.map(y => rowMap[y].sort((a, b) => a.x - b.x))
   );
 
@@ -1342,6 +1418,38 @@ function detectColumnBoundaries(rowItemArrays) {
     }
   });
 
+  return merged;
+}
+
+// ── Locate the bank profile's header row and use its x-positions as
+//    column anchors ─────────────────────────────────────────────────
+function findHeaderRowAnchors(sortedYs, rowMap, profile) {
+  if (!profile || !profile.headerHints) return null;
+  for (const y of sortedYs) {
+    const rowItems = rowMap[y].sort((a, b) => a.x - b.x);
+    const rowText = rowItems.map(i => i.text.toLowerCase()).join(' ');
+    const matches = profile.headerHints.filter(h => rowText.includes(h));
+    if (matches.length >= Math.ceil(profile.headerHints.length * 0.6)) {
+      const merged = mergeNearbyPositions(rowItems.map(i => i.x), 30);
+      if (profile.columns && merged.length === profile.columns.length) {
+        return merged;
+      }
+      return null; // header found but word-splitting didn't match column count — fall back
+    }
+  }
+  return null;
+}
+
+function mergeNearbyPositions(xs, tolerance) {
+  const sorted = [...xs].sort((a, b) => a - b);
+  const merged = [];
+  sorted.forEach(x => {
+    if (!merged.length || x - merged[merged.length - 1] > tolerance) {
+      merged.push(x);
+    } else {
+      merged[merged.length - 1] = (merged[merged.length - 1] + x) / 2;
+    }
+  });
   return merged;
 }
 
@@ -1435,6 +1543,61 @@ function postProcessRows(rows) {
   });
 }
 
+// ── Merge wrapped description lines into the preceding transaction row ──
+// Bank statements often wrap a long description across two PDF lines; the
+// continuation line has no date, so we fold its description cell back
+// into the previous row instead of emitting a bogus extra row.
+function mergeWrappedRows(rows, profile) {
+  if (!profile || profile.continuationCol === undefined) return rows;
+  const dateCol = (profile.dateColumns && profile.dateColumns[0]) || 0;
+  const contCol = profile.continuationCol;
+  const result = [];
+  rows.forEach(row => {
+    const dateVal = (row[dateCol] || '').trim();
+    const contVal = (row[contCol] || '').trim();
+    if (!dateVal && contVal && result.length) {
+      const prev = result[result.length - 1];
+      prev[contCol] = (prev[contCol] + ' ' + contVal).trim();
+    } else {
+      result.push(row.slice());
+    }
+  });
+  return result;
+}
+
+// ── Normalize extracted rows to the bank profile's canonical column
+//    schema and prepend the matching header row ──────────────────────
+function normalizeToProfileColumns(rows, profile) {
+  if (!profile || !profile.columns) return rows;
+  const target = profile.columns.length;
+  const fixed = rows.map(r => {
+    const row = r.slice(0, target);
+    while (row.length < target) row.push('');
+    return row;
+  });
+  return [profile.columns.slice(), ...fixed];
+}
+
+// ── Apply number/date formatting only to the columns the profile marks
+//    as amount/date columns, skipping the header row ───────────────────
+function applyProfileFormatting(rows, profile) {
+  return rows.map((row, idx) => {
+    if (idx === 0) return row;
+    return row.map((cell, ci) => {
+      let val = (cell || '').trim();
+      if (!val) return val;
+      if (bankOpts.trim) val = val.replace(/\s+/g, ' ').trim();
+      if (bankOpts.dates && profile.dateColumns && profile.dateColumns.includes(ci)) {
+        val = fixTurkishDate(val);
+      }
+      if (bankOpts.numbers && profile.amountColumns && profile.amountColumns.includes(ci)) {
+        val = fixTurkishNumber(val);
+      }
+      return val;
+    });
+  });
+}
+
 function fixTurkishNumber(val) {
   // Match Turkish currency: 1.234,56 or -1.234,56 or 1.234,56 TL
   const trNumRegex = /^-?[\d]{1,3}(?:\.[\d]{3})*(?:,[\d]{2})?(\s*(TL|₺|EUR|USD|\$|€))?$/;
@@ -1475,7 +1638,10 @@ async function smartBankExtract() {
     const tableRows = filterBankTableRows(rows, currentBank);
 
     if (tableRows.length > 1) {
-      const processed = postProcessRows(tableRows);
+      const profile = getActiveProfile();
+      const processed = (profile && profile.columns)
+        ? applyProfileFormatting(normalizeToProfileColumns(mergeWrappedRows(tableRows, profile), profile), profile)
+        : postProcessRows(tableRows);
       selCounter++;
       selections.push({
         id: selCounter,
