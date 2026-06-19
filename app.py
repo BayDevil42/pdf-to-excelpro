@@ -60,13 +60,11 @@ class Api:
 
 def main():
     html_path = resource_path('index.html')
-    with open(html_path, 'r', encoding='utf-8') as f:
-        html_content = f.read()
 
     api = Api()
     window = webview.create_window(
         title='PDF → Excel Pro | Talvixa',
-        html=html_content,
+        url=html_path,
         width=1300,
         height=840,
         min_size=(960, 640),

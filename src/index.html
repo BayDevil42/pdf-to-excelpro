@@ -1926,11 +1926,27 @@ function b64EncodeUnicode(str) {
   return btoa(unescape(encodeURIComponent(str)));
 }
 
+// pywebview's js_api bridge binds asynchronously after the window loads
+// (fires 'pywebviewready'); window.pywebview can exist before .api is
+// actually usable, so exporting right after launch could otherwise race
+// past the check below and silently fall back to a browser download.
+let pywebviewReady = !!(window.pywebview && window.pywebview.api);
+window.addEventListener('pywebviewready', () => { pywebviewReady = true; });
+
 // Save a base64 payload to disk. Uses pywebview's native save dialog
 // when running inside the desktop app, falls back to a browser
 // download if opened in a regular web browser.
-function saveFileToDisk(filename, base64data, kind) {
-  if (window.pywebview && window.pywebview.api && window.pywebview.api.save_file) {
+function saveFileToDisk(filename, base64data, kind, retries) {
+  retries = retries || 0;
+  const hasApi = window.pywebview && window.pywebview.api && window.pywebview.api.save_file;
+  if (!hasApi && window.pywebview && !pywebviewReady && retries < 20) {
+    // Bridge not bound yet but we're inside the desktop app: wait instead
+    // of silently dropping to the browser-download fallback.
+    setTimeout(() => saveFileToDisk(filename, base64data, kind, retries + 1), 150);
+    return;
+  }
+
+  if (hasApi) {
     window.pywebview.api.save_file(filename, base64data).then(res => {
       if (res && res.success) {
         toast(`✅ ${filename} kaydedildi`);
