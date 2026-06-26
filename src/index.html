@@ -908,6 +908,7 @@ body {
         <button class="bank-opt-toggle active" id="togNum" onclick="toggleOpt(this,'numbers')" title="Sayısal değerleri düzelt">Sayılar</button>
         <button class="bank-opt-toggle active" id="togDate" onclick="toggleOpt(this,'dates')" title="Tarihleri biçimlendir">Tarihler</button>
         <button class="bank-opt-toggle" id="togHeader" onclick="toggleOpt(this,'header')" title="İlk satırı başlık yap">Başlık</button>
+        <button class="bank-opt-toggle" id="togBalance" onclick="toggleOpt(this,'balanceCheck')" title="Bakiye - önceki bakiye ≠ tutar olan satırları 'Kontrol' sütununda işaretle">Bakiye Kontrolü</button>
       </div>
     </div>
 
@@ -1029,7 +1030,7 @@ let startX = 0, startY = 0;
 let pageWrapRect = null;
 
 // Bank options state
-let bankOpts = { trim: true, numbers: true, dates: true, header: false };
+let bankOpts = { trim: true, numbers: true, dates: true, header: false, balanceCheck: false };
 let currentBank = 'generic';
 
 // ── Bank profile definitions ───────────────────────────────────────────
@@ -1045,35 +1046,40 @@ const BANK_PROFILES = {
     detect: { ibanPrefix: ['tr230012', 'tr0012'], textHints: ['halk bankası', 'halkbank', 'cüzdan bilgileri', 'cüzdan seri no'] },
     headerHints: ['işlem tarihi', 'açıklama', 'işlem tutarı', 'bakiye'],
     columns: ['İşlem Tarihi', 'Açıklama', 'İşlem Tutarı', 'Bakiye'],
-    dateColumns: [0], amountColumns: [2, 3], continuationCol: 1
+    dateColumns: [0], amountColumns: [2, 3], continuationCol: 1,
+    balanceCheck: { amountCol: 2, balanceCol: 3 }
   },
   kuveytturk: {
     name: 'Kuveyt Türk',
     detect: { ibanPrefix: ['tr580020', 'tr0020'], textHints: ['kuveyt türk', 'kuveytturk', 'hesap özeti', 'devir bakiyesi'] },
     headerHints: ['işlem tarihi', 'referans kodu', 'açıklama', 'tutar', 'bakiye'],
     columns: ['İşlem Tarihi', 'Referans Kodu', 'Açıklama', 'Tutar', 'Bakiye'],
-    dateColumns: [0], amountColumns: [3, 4], continuationCol: 2
+    dateColumns: [0], amountColumns: [3, 4], continuationCol: 2,
+    balanceCheck: { amountCol: 3, balanceCol: 4 }
   },
   ziraat: {
     name: 'Ziraat Bankası',
     detect: { ibanPrefix: ['tr1800209', 'tr180020'], textHints: ['ziraat mobil', 'ziraat bankası'] },
     headerHints: ['tarih', 'açıklama', 'tutar', 'bakiye'],
     columns: ['Tarih', 'Açıklama', 'Tutar', 'Bakiye'],
-    dateColumns: [0], amountColumns: [2, 3], continuationCol: 1
+    dateColumns: [0], amountColumns: [2, 3], continuationCol: 1,
+    balanceCheck: { amountCol: 2, balanceCol: 3 }
   },
   isbank: {
     name: 'İş Bankası',
     detect: { ibanPrefix: ['tr8400064', 'tr840006'], textHints: ['türkiye iş bankası', 'işcep', 'hesap özeti'] },
     headerHints: ['tarih/saat', 'kanal/şube', 'işlem tutarı', 'bakiye', 'ek hesap', 'işlem tipi', 'açıklama'],
     columns: ['Tarih/Saat', 'Kanal/Şube', 'İşlem Tutarı', 'Bakiye', 'Ek Hesap Bakiyesi', 'İşlem', 'İşlem Tipi', 'Açıklama'],
-    dateColumns: [0], amountColumns: [2, 3, 4], continuationCol: 7
+    dateColumns: [0], amountColumns: [2, 3, 4], continuationCol: 7,
+    balanceCheck: { amountCol: 2, balanceCol: 3 }
   },
   garanti: {
     name: 'Garanti BBVA',
     detect: { ibanPrefix: ['tr9600062', 'tr960006'], textHints: ['garanti bbva', 't.garanti bankası', 'hesap hareketleri bilgileri'] },
     headerHints: ['tarih', 'açıklama', 'etiket', 'tutar', 'bakiye'],
     columns: ['Tarih', 'Açıklama', 'Etiket', 'Tutar', 'Bakiye'],
-    dateColumns: [0], amountColumns: [3, 4], continuationCol: 1
+    dateColumns: [0], amountColumns: [3, 4], continuationCol: 1,
+    balanceCheck: { amountCol: 3, balanceCol: 4 }
   },
   akbank: { name: 'Akbank', detect: null, headerHints: null, columns: null },
   vakif: {
@@ -1081,14 +1087,16 @@ const BANK_PROFILES = {
     detect: { ibanPrefix: ['tr8500015', 'tr850001'], textHints: ['vakıfbank', 'vakif bankasi'] },
     headerHints: ['tarih', 'saat', 'işlem no', 'miktar', 'bakiye', 'işlem adı'],
     columns: ['Tarih', 'Saat', 'İşlem No', 'Miktar', 'Bakiye', 'İşlem Adı'],
-    dateColumns: [0], amountColumns: [3, 4], continuationCol: 5
+    dateColumns: [0], amountColumns: [3, 4], continuationCol: 5,
+    balanceCheck: { amountCol: 3, balanceCol: 4 }
   },
   yapikredi: {
     name: 'Yapı Kredi',
     detect: { ibanPrefix: ['tr420006701', 'tr420006'], textHints: ['yapıkredi', 'yapı kredi', 'hesap özeti'] },
     headerHints: ['tarih', 'valör tarihi', 'açıklama', 'işlem tutarı', 'güncel bakiye'],
     columns: ['Tarih', 'Valör Tarihi', 'Açıklama', 'İşlem Tutarı', 'Güncel Bakiye'],
-    dateColumns: [0, 1], amountColumns: [3, 4], continuationCol: 2
+    dateColumns: [0, 1], amountColumns: [3, 4], continuationCol: 2,
+    balanceCheck: { amountCol: 3, balanceCol: 4 }
   },
   denizbank: { name: 'Denizbank', detect: null, headerHints: null, columns: null },
   enpara: { name: 'Enpara / QNB', detect: null, headerHints: null, columns: null },
@@ -1140,8 +1148,17 @@ const fileInput = document.getElementById('fileInput');
 const dropArea = document.getElementById('dropArea');
 const viewerScroll = document.getElementById('viewerScroll');
 
+function handleIncomingFiles(files) {
+  const pdfs = Array.from(files).filter(f => f && f.type === 'application/pdf' || /\.pdf$/i.test(f.name));
+  if (pdfs.length > 1) {
+    batchProcessAndExport(pdfs);
+  } else if (pdfs.length === 1) {
+    loadPDF(pdfs[0]);
+  }
+}
+
 fileInput.addEventListener('change', () => {
-  if (fileInput.files[0]) loadPDF(fileInput.files[0]);
+  if (fileInput.files.length) handleIncomingFiles(fileInput.files);
   fileInput.value = '';
 });
 
@@ -1150,12 +1167,12 @@ dropArea.addEventListener('dragover', e => { e.preventDefault(); dropArea.classL
 dropArea.addEventListener('dragleave', () => dropArea.classList.remove('over'));
 dropArea.addEventListener('drop', e => {
   e.preventDefault(); dropArea.classList.remove('over');
-  if (e.dataTransfer.files[0]) loadPDF(e.dataTransfer.files[0]);
+  if (e.dataTransfer.files.length) handleIncomingFiles(e.dataTransfer.files);
 });
 viewerScroll.addEventListener('dragover', e => e.preventDefault());
 viewerScroll.addEventListener('drop', e => {
   e.preventDefault();
-  if (e.dataTransfer.files[0]) loadPDF(e.dataTransfer.files[0]);
+  if (e.dataTransfer.files.length) handleIncomingFiles(e.dataTransfer.files);
 });
 
 async function loadPDF(file) {
@@ -1349,9 +1366,9 @@ async function extractRegion(pageNum, rx, ry, rw, rh) {
 }
 
 // ── Full-page smart extraction ─────────────────────────────────────────
-async function extractFullPage(pageNum) {
-  const page = await pdfDoc.getPage(pageNum);
-  const vp = page.getViewport({ scale: zoom });
+async function extractFullPage(pageNum, doc) {
+  doc = doc || pdfDoc;
+  const page = await doc.getPage(pageNum);
   const content = await page.getTextContent();
   const vpNatural = page.getViewport({ scale: 1 });
   const pageH = vpNatural.height;
@@ -1749,6 +1766,29 @@ function fixTurkishDate(val) {
   return val;
 }
 
+function flagBalanceContinuity(rows, profile) {
+  if (!profile || !profile.balanceCheck) return rows;
+  const { amountCol, balanceCol } = profile.balanceCheck;
+  const toNum = s => {
+    const n = parseFloat((s || '').replace(/\s/g, ''));
+    return Number.isFinite(n) ? n : null;
+  };
+  let prevBalance = null;
+  const out = rows.map((row, idx) => {
+    if (idx === 0) return row.concat(['Kontrol']);
+    const amount = toNum(row[amountCol]);
+    const balance = toNum(row[balanceCol]);
+    let flag = '';
+    if (prevBalance !== null && amount !== null && balance !== null) {
+      const expected = prevBalance + amount;
+      if (Math.abs(expected - balance) > 0.01) flag = 'Uyumsuz';
+    }
+    if (balance !== null) prevBalance = balance;
+    return row.concat([flag]);
+  });
+  return out;
+}
+
 // ── Smart Bank Mode ────────────────────────────────────────────────────
 async function smartBankExtract() {
   showLoading('Akıllı banka taraması...', true);
@@ -1771,7 +1811,7 @@ async function smartBankExtract() {
     const tableRows = filterBankTableRows(rows, currentBank);
 
     if (tableRows.length > 1) {
-      const processed = (profile && profile.columns)
+      let processed = (profile && profile.columns)
         ? applyProfileFormatting(
             splitCombinedAmountCells(
               normalizeToProfileColumns(mergeWrappedRows(tableRows, profile), profile),
@@ -1780,6 +1820,9 @@ async function smartBankExtract() {
             profile
           )
         : postProcessRows(tableRows);
+      if (bankOpts.balanceCheck) {
+        processed = flagBalanceContinuity(processed, profile);
+      }
       selCounter++;
       selections.push({
         id: selCounter,
@@ -1806,6 +1849,133 @@ async function smartBankExtract() {
   } else {
     toast('⚠️ Tablo verisi tespit edilemedi. Manuel seçim deneyin.');
   }
+}
+
+// Detect a bank profile for a standalone doc without touching the
+// viewer's global currentBank state (used by batch processing).
+async function detectBankProfileKey(doc) {
+  try {
+    const page = await doc.getPage(1);
+    const content = await page.getTextContent();
+    const text = content.items.map(i => i.str).join(' ').toLowerCase();
+    for (const [key, profile] of Object.entries(BANK_PROFILES)) {
+      if (!profile.detect) continue;
+      const hints = profile.detect.textHints || [];
+      const ibanPrefixes = profile.detect.ibanPrefix || [];
+      const hintMatch = hints.some(h => text.includes(h));
+      const ibanMatch = ibanPrefixes.some(p => text.includes(p));
+      if (hintMatch || ibanMatch) return key;
+    }
+  } catch (e) {
+    // Detection is best-effort; keep generic profile on failure.
+  }
+  return 'generic';
+}
+
+// Extract every page of a single PDF (already-loaded doc) into one
+// combined row set, using the same pipeline as smartBankExtract but
+// scoped locally so it never touches the main viewer's pdfDoc/selections.
+async function extractAllRowsFromDoc(doc, bankKey) {
+  const profile = BANK_PROFILES[bankKey] || null;
+  const allRows = [];
+  for (let p = 1; p <= doc.numPages; p++) {
+    const rawRows = await extractFullPage(p, doc);
+    if (!rawRows || rawRows.length < 2) continue;
+    const rows = dropPreambleRows(rawRows, profile);
+    const tableRows = filterBankTableRows(rows, bankKey);
+    if (tableRows.length <= 1) continue;
+    let processed = (profile && profile.columns)
+      ? applyProfileFormatting(
+          splitCombinedAmountCells(
+            normalizeToProfileColumns(mergeWrappedRows(tableRows, profile), profile),
+            profile
+          ),
+          profile
+        )
+      : postProcessRows(tableRows);
+    if (bankOpts.balanceCheck) {
+      processed = flagBalanceContinuity(processed, profile);
+    }
+    allRows.push(...processed);
+  }
+  return { rows: allRows, profile };
+}
+
+// ── Batch multi-PDF processing ─────────────────────────────────────────
+// Loads each dropped/selected PDF independently (no shared state with the
+// main viewer), extracts its transaction table, and writes one sheet per
+// file into a single workbook.
+async function batchProcessAndExport(files) {
+  showLoading('Toplu PDF işleniyor...', true);
+  const wb = XLSX.utils.book_new();
+  let totalRows = 0;
+  const usedNames = new Set();
+
+  try {
+    for (let fi = 0; fi < files.length; fi++) {
+      const file = files[fi];
+      setLoadingText(`${file.name} (${fi + 1}/${files.length}) işleniyor...`);
+      setProgress((fi / files.length) * 100);
+
+      let sheetRows = [['Hata: PDF okunamadı']];
+      try {
+        const ab = await file.arrayBuffer();
+        const doc = await pdfjsLib.getDocument({ data: ab }).promise;
+        const bankKey = await detectBankProfileKey(doc);
+        const { rows } = await extractAllRowsFromDoc(doc, bankKey);
+        if (rows.length) {
+          sheetRows = rows;
+          totalRows += rows.length;
+        } else {
+          sheetRows = [['Tablo verisi tespit edilemedi']];
+        }
+      } catch (e) {
+        sheetRows = [['Hata: ' + e.message]];
+      }
+
+      const maxCols = Math.max(...sheetRows.map(r => r.length));
+      const norm = sheetRows.map(r => {
+        const row = r.slice();
+        while (row.length < maxCols) row.push('');
+        return row;
+      });
+      const ws = XLSX.utils.aoa_to_sheet(norm);
+      const widths = [];
+      norm.forEach(row => row.forEach((cell, ci) => {
+        const l = String(cell || '').length;
+        if (!widths[ci] || l > widths[ci]) widths[ci] = l;
+      }));
+      ws['!cols'] = widths.map(w => ({ wch: Math.min(Math.max((w || 6) + 2, 8), 50) }));
+
+      let baseName = file.name.replace(/\.pdf$/i, '').slice(0, 28) || `Dosya${fi + 1}`;
+      let sheetName = baseName.replace(/[\\\/\?\*\[\]:]/g, '_');
+      let uniqueName = sheetName;
+      let n = 2;
+      while (usedNames.has(uniqueName)) { uniqueName = (sheetName + '_' + n).slice(0, 31); n++; }
+      usedNames.add(uniqueName);
+      XLSX.utils.book_append_sheet(wb, ws, uniqueName);
+    }
+
+    const metaWs = XLSX.utils.aoa_to_sheet([
+      ['PDF→XLS PRO — Toplu İşleme Raporu'],
+      ['Talvixa'],
+      [''],
+      ['Geliştirici:', 'Levent Emirhan Özhan'],
+      ['Dışa Aktarım:', new Date().toLocaleString('tr-TR')],
+      ['Toplam Dosya:', files.length],
+      ['Toplam Satır:', totalRows],
+    ]);
+    metaWs['!cols'] = [{wch: 20}, {wch: 30}];
+    XLSX.utils.book_append_sheet(wb, metaWs, 'Bilgi');
+
+    setProgress(100);
+    const base64 = XLSX.write(wb, { bookType: 'xlsx', type: 'base64' });
+    saveFileToDisk(`Toplu_Aktarim_${files.length}_dosya.xlsx`, base64, 'xlsx');
+    toast(`✅ ${files.length} dosya işlendi — ${totalRows} satır bulundu`);
+  } catch (e) {
+    toast('❌ Toplu işleme hatası: ' + e.message);
+  }
+  hideLoading();
 }
 
 // ── Filter rows to keep only data table rows ──────────────────────────
