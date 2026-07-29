@@ -1264,63 +1264,183 @@ async function extractFullPage(pageNum) {
 }
 
 // ── Shared row builder with advanced column alignment ─────────────────
+// Turkish bank ledgers ("İşlem Tarihi | Referans | Açıklama | Tutar | Bakiye")
+// commonly wrap the free-text Açıklama cell onto 1-2 extra physical PDF text
+// lines, with the single-line Tarih/Referans/Tutar/Bakiye columns vertically
+// centered against that taller wrapped cell. A plain Y-proximity row
+// clustering can't segment that reliably (the extra lines sit almost
+// exactly halfway between two real rows), so once we detect a date-led
+// first column we switch to an anchor-based parser: every physical line
+// whose first token is a date starts a new logical row, and any other line
+// gets folded into whichever anchor it sits closest to.
+const DATE_RE = /^\d{1,2}[.\/-]\d{1,2}[.\/-]\d{2,4}$/;
+const AMOUNT_RE = /^-?\d{1,3}(\.\d{3})*,\d{2}$/;
+
+// Whitespace in the source PDF is often its own text item (str === ' '),
+// which gets dropped by the `.trim()` filter above along with every other
+// empty item. Re-joining the surviving items must not blindly insert a
+// space between every pair — many PDFs (this bank included) also split a
+// single token like "11-12-" into separate items ("11", "-", "12", "-")
+// with zero gap between them purely due to font kerning. Only insert a
+// space when the actual X gap between two items indicates one was there.
+const GLUE_GAP = 1;
+function joinItemsText(items) {
+  let out = '';
+  let prevEnd = null;
+  items.forEach(item => {
+    if (prevEnd !== null && item.x - prevEnd > GLUE_GAP) out += ' ';
+    out += item.text;
+    prevEnd = item.x + (item.width || 0);
+  });
+  return out;
+}
+
 function buildRowsFromItems(items, pageH, scale) {
-  // Build raw item list with canvas coords
   const rawItems = items.map(item => ({
     x: item.transform[4],
     y: Math.round((pageH - item.transform[5]) * 100) / 100,
     text: item.str,
     width: item.width || 0,
-    height: item.height || 10,
-    fontSize: Math.abs(item.transform[3]) || 10,
   })).filter(i => i.text.trim());
 
   if (!rawItems.length) return [];
+  rawItems.sort((a, b) => a.y - b.y || a.x - b.x);
 
-  // Cluster rows by Y proximity (adaptive tolerance based on font size)
-  const avgFontSize = rawItems.reduce((s, i) => s + i.fontSize, 0) / rawItems.length;
+  // 1) Cluster into physical lines (tight tolerance — same PDF text line only)
+  const lines = [];
+  rawItems.forEach(item => {
+    const last = lines[lines.length - 1];
+    if (last && Math.abs(item.y - last.y) <= 1.5) last.items.push(item);
+    else lines.push({ y: item.y, items: [item] });
+  });
+  lines.forEach(l => l.items.sort((a, b) => a.x - b.x));
+
+  const anchorIdx = detectLedgerAnchors(lines);
+  if (anchorIdx.length >= Math.max(2, lines.length * 0.08)) {
+    return buildLedgerRows(lines, anchorIdx);
+  }
+
+  // Fallback: legacy Y-proximity clustering + global column boundaries,
+  // used for non-ledger tables (e.g. a manual drag-select over any PDF).
+  const avgFontSize = 10;
   const rowTolerance = Math.max(avgFontSize * 0.6, 3);
-
   const rowMap = {};
   rawItems.forEach(item => {
     const rowKey = Math.round(item.y / rowTolerance) * rowTolerance;
-    if (!rowMap[rowKey]) rowMap[rowKey] = [];
-    rowMap[rowKey].push(item);
+    (rowMap[rowKey] = rowMap[rowKey] || []).push(item);
   });
-
   const sortedYs = Object.keys(rowMap).map(Number).sort((a, b) => a - b);
+  const rowItemArrays = sortedYs.map(y => rowMap[y].sort((a, b) => a.x - b.x));
+  const colBoundaries = detectColumnBoundaries(rowItemArrays);
+  return rowItemArrays
+    .map(rowItems => assignToColumns(rowItems, colBoundaries))
+    .filter(r => r.some(c => c.trim()));
+}
 
-  // Detect column boundaries across ALL rows (global column alignment)
-  // This is the key improvement for bank statements
-  const allXPositions = [];
-  sortedYs.forEach(y => {
-    rowMap[y].sort((a, b) => a.x - b.x).forEach(item => {
-      allXPositions.push(item.x);
-    });
+// ── Find the physical lines that are real "İşlem Tarihi" row starts ───
+// A date-like token can also appear as the first word of a *wrapped*
+// description line (e.g. "15.03.26 senede mahsuben ..."). Real anchors all
+// sit at the same X (the Tarih column); wrapped false positives sit much
+// further right (the Açıklama column), so we keep only the dominant X.
+function detectLedgerAnchors(lines) {
+  const candidates = [];
+  lines.forEach((l, i) => { if (DATE_RE.test(l.items[0].text)) candidates.push({ i, x: l.items[0].x }); });
+  if (!candidates.length) return [];
+
+  const xCounts = {};
+  candidates.forEach(c => {
+    const bin = Math.round(c.x / 3) * 3;
+    xCounts[bin] = (xCounts[bin] || 0) + 1;
+  });
+  let dominantX = null, dominantCount = 0;
+  Object.entries(xCounts).forEach(([bin, cnt]) => {
+    if (cnt > dominantCount) { dominantCount = cnt; dominantX = parseFloat(bin); }
   });
 
-  // Find column separators using gap analysis
-  const colBoundaries = detectColumnBoundaries(
-    sortedYs.map(y => rowMap[y].sort((a, b) => a.x - b.x))
-  );
+  return candidates.filter(c => Math.abs(c.x - dominantX) <= 6).map(c => c.i);
+}
 
-  // Build rows using column boundaries
-  const rows = sortedYs.map(y => {
-    const rowItems = rowMap[y].sort((a, b) => a.x - b.x);
-    return assignToColumns(rowItems, colBoundaries);
+// ── Build ledger rows: Tarih | Referans | Açıklama | Tutar | Bakiye | ... ──
+function buildLedgerRows(lines, anchorIdx) {
+  const pitches = [];
+  for (let i = 1; i < anchorIdx.length; i++) pitches.push(lines[anchorIdx[i]].y - lines[anchorIdx[i - 1]].y);
+  pitches.sort((a, b) => a - b);
+  const rowPitch = pitches.length ? pitches[Math.floor(pitches.length / 2)] : 20;
+  const maxDrift = Math.max(rowPitch * 0.45, 6); // how far a wrap line may sit from its row's anchor
+
+  const groups = anchorIdx.map(i => ({ anchorLine: lines[i], wrapLines: [] }));
+  const anchorSet = new Set(anchorIdx);
+  lines.forEach((line, i) => {
+    if (anchorSet.has(i)) return;
+    let best = -1, bestDist = Infinity;
+    anchorIdx.forEach((ai, ri) => {
+      const d = Math.abs(lines[ai].y - line.y);
+      if (d < bestDist) { bestDist = d; best = ri; }
+    });
+    if (best >= 0 && bestDist <= maxDrift) groups[best].wrapLines.push(line);
+  });
+  groups.forEach(g => g.wrapLines.sort((a, b) => a.y - b.y));
+
+  return groups.map(g => {
+    const anchorItems = g.anchorLine.items; // already X-sorted
+    // Trailing amount tokens on the anchor line = Tutar, Bakiye (…): peel
+    // them off from the right by pattern, since they're right-aligned and
+    // their left edge shifts with digit count (not usable as a boundary).
+    // A negative amount's "-" sign is frequently its own glued text item
+    // (same kerning quirk as "11-12-" above), so it won't match AMOUNT_RE
+    // on its own — absorb it into the number it's glued to when found.
+    let end = anchorItems.length;
+    const trail = [];
+    while (end > 1 && AMOUNT_RE.test(anchorItems[end - 1].text)) {
+      let amt = anchorItems[end - 1].text;
+      let newEnd = end - 1;
+      if (newEnd > 1 && anchorItems[newEnd - 1].text === '-') {
+        const sign = anchorItems[newEnd - 1];
+        const num = anchorItems[end - 1];
+        if (num.x - (sign.x + sign.width) <= GLUE_GAP) { amt = '-' + amt; newEnd--; }
+      }
+      trail.unshift(amt);
+      end = newEnd;
+    }
+
+    const tarih = anchorItems[0].text;
+    const referans = anchorItems.length > 1 ? anchorItems[1].text : '';
+    const anchorDesc = joinItemsText(anchorItems.slice(2, end));
+
+    // A bank occasionally prints a bare "-" placeholder for an amount cell
+    // (e.g. Tutar) instead of "0,00" — since it's still short of the row's
+    // usual 2 trailing amounts, it ends up on its own wrap line rather than
+    // glued to the anchor. Recognize a trailing wrap line that's just a
+    // dash as that missing amount, not free-text description content.
+    const wrapLines = g.wrapLines.slice();
+    if (trail.length < 2 && wrapLines.length) {
+      const lastLine = wrapLines[wrapLines.length - 1];
+      if (joinItemsText(lastLine.items).trim() === '-') { wrapLines.pop(); trail.unshift('-'); }
+    }
+
+    const wrapText = wrapLines.map(l => joinItemsText(l.items)).join(' ');
+    const desc = [anchorDesc, wrapText].filter(Boolean).join(' ');
+
+    return [tarih, referans, desc, ...trail].map(c => (c || '').trim());
   }).filter(r => r.some(c => c.trim()));
-
-  return rows;
 }
 
 // ── Detect column boundaries from all rows ───────────────────────────
 function detectColumnBoundaries(rowItemArrays) {
-  // Collect all X positions weighted by occurrence
+  // Only trust an X position as a column start when it's preceded by a real
+  // column gutter (a big gap), not ordinary intra-sentence word spacing —
+  // otherwise recurring phrases inside a free-text cell (e.g. "İşyeri No:")
+  // get mistaken for column boundaries.
+  const GAP_THRESHOLD = 8;
   const xHist = {};
   rowItemArrays.forEach(rowItems => {
-    rowItems.forEach(item => {
-      const xBin = Math.round(item.x / 2) * 2; // 2-unit bins
-      xHist[xBin] = (xHist[xBin] || 0) + 1;
+    rowItems.forEach((item, idx) => {
+      const prev = rowItems[idx - 1];
+      const gap = prev ? item.x - (prev.x + prev.width) : Infinity;
+      if (gap > GAP_THRESHOLD) {
+        const xBin = Math.round(item.x / 2) * 2; // 2-unit bins
+        xHist[xBin] = (xHist[xBin] || 0) + 1;
+      }
     });
   });
 
@@ -1354,26 +1474,24 @@ function assignToColumns(rowItems, colBoundaries) {
 
   // Create column slots
   const cols = new Array(colBoundaries.length).fill('');
+  const lastEnd = new Array(colBoundaries.length).fill(null);
 
   rowItems.forEach(item => {
-    // Find closest column boundary (within tolerance)
+    // Zone/band assignment: the item belongs to the last boundary at or
+    // before its X — not whichever boundary is numerically "nearest" — so
+    // a wide column stays intact even when a spurious boundary is detected
+    // further to the right.
     let bestCol = 0;
-    let bestDist = Infinity;
-    colBoundaries.forEach((boundary, i) => {
-      const dist = Math.abs(item.x - boundary);
-      if (dist < bestDist) {
-        bestDist = dist;
-        bestCol = i;
-      }
-    });
-
-    // Append to column (handle multi-word cells)
-    if (cols[bestCol]) {
-      // Check if it's a continuation (x is very close after last char) or new cell
-      cols[bestCol] += ' ' + item.text;
-    } else {
-      cols[bestCol] = item.text;
+    for (let i = 0; i < colBoundaries.length; i++) {
+      if (colBoundaries[i] <= item.x + 0.5) bestCol = i; else break;
     }
+
+    // Append to column (handle multi-word cells) — only insert a space when
+    // the X gap shows there really was one (see joinItemsText above).
+    const prevEnd = lastEnd[bestCol];
+    const needsSpace = prevEnd !== null && item.x - prevEnd > GLUE_GAP;
+    cols[bestCol] = cols[bestCol] ? cols[bestCol] + (needsSpace ? ' ' : '') + item.text : item.text;
+    lastEnd[bestCol] = item.x + (item.width || 0);
   });
 
   return cols.map(c => c.trim());
@@ -1396,7 +1514,7 @@ function groupIntoColumns(items) {
       cols.push(cur.trim());
       cur = items[i].text;
     } else {
-      cur += ' ' + items[i].text;
+      cur += (gap > GLUE_GAP ? ' ' : '') + items[i].text;
     }
     lastX = items[i].x + (items[i].width || 0);
   }
@@ -1440,9 +1558,11 @@ function fixTurkishNumber(val) {
   const trNumRegex = /^-?[\d]{1,3}(?:\.[\d]{3})*(?:,[\d]{2})?(\s*(TL|₺|EUR|USD|\$|€))?$/;
   const cleaned = val.replace(/\s/g, '');
   if (trNumRegex.test(cleaned)) {
-    // Remove thousand separator dots, keep as text for proper Excel handling
-    // Return cleaned version — Excel will auto-detect
-    return val.replace(/(\d)\.(\d{3})/g, '$1$2').replace(',', '.');
+    // Strip every thousand-separator dot, then swap the decimal comma for a
+    // dot. (A regex that only strips one "\d.\d{3}" group at a time leaves
+    // amounts of a million or more, e.g. "1.835.439,01", half-converted —
+    // each match consumes the digit the next separator needed.)
+    return val.replace(/\./g, '').replace(',', '.');
   }
   return val;
 }
@@ -1679,7 +1799,22 @@ function doExport(sels, type, baseName) {
       return r;
     });
 
-    const ws = XLSX.utils.aoa_to_sheet(norm);
+    // aoa_to_sheet types a cell purely by the JS value's typeof — a numeric
+    // string like "1186.19" (produced by fixTurkishNumber above) still
+    // lands in Excel as TEXT, not a real number, so it can't be summed or
+    // sorted. Convert cells that are plainly numeric (and only when the
+    // "Sayılar" number-fix option is on, since with it off a cell may still
+    // hold the original Turkish "1.234,56" formatting) into real numbers.
+    const AMOUNT_CELL_RE = /^-?\d+(\.\d+)?$/;
+    const sheetData = norm.map(row => row.map(cell => {
+      if (bankOpts.numbers && typeof cell === 'string' && AMOUNT_CELL_RE.test(cell)) {
+        const n = Number(cell);
+        if (Number.isFinite(n)) return n;
+      }
+      return cell;
+    }));
+
+    const ws = XLSX.utils.aoa_to_sheet(sheetData);
 
     // Apply header row styling if opted in
     if (bankOpts.header && norm.length > 0) {
