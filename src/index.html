@@ -907,7 +907,8 @@ body {
         <button class="bank-opt-toggle active" id="togTrim" onclick="toggleOpt(this,'trim')" title="Boş hücreleri temizle">Temizle</button>
         <button class="bank-opt-toggle active" id="togNum" onclick="toggleOpt(this,'numbers')" title="Sayısal değerleri düzelt">Sayılar</button>
         <button class="bank-opt-toggle active" id="togDate" onclick="toggleOpt(this,'dates')" title="Tarihleri biçimlendir">Tarihler</button>
-        <button class="bank-opt-toggle" id="togHeader" onclick="toggleOpt(this,'header')" title="İlk satırı başlık yap">Başlık</button>
+        <button class="bank-opt-toggle active" id="togHeader" onclick="toggleOpt(this,'header')" title="Sütun başlıkları ekle (Tarih, Açıklama, Tutar…)">Başlık</button>
+        <button class="bank-opt-toggle active" id="togMerge" onclick="toggleOpt(this,'merge')" title="Tüm sayfaları tek bir Excel sayfasında birleştir">Tek Tablo</button>
       </div>
     </div>
 
@@ -1029,7 +1030,7 @@ let startX = 0, startY = 0;
 let pageWrapRect = null;
 
 // Bank options state
-let bankOpts = { trim: true, numbers: true, dates: true, header: false };
+let bankOpts = { trim: true, numbers: true, dates: true, header: true, merge: true };
 let currentBank = 'generic';
 
 function toggleOpt(el, key) {
@@ -1209,13 +1210,15 @@ document.addEventListener('mouseup', async e => {
     toast('⚠️ Bu alanda veri bulunamadı'); return;
   }
   selCounter++;
+  const isLedger = !!rows.isLedger; // survives only on the raw array
   const processed = postProcessRows(rows);
   const sel = {
     id: selCounter,
     page: currentPage,
     x: rx, y: ry, w: rw, h: rh,
     rows: processed,
-    label: `S${currentPage}-#${selCounter}`
+    label: `S${currentPage}-#${selCounter}`,
+    ledger: isLedger
   };
   selections.push(sel);
   drawSavedSel(sel);
@@ -1316,8 +1319,19 @@ function buildRowsFromItems(items, pageH, scale) {
   lines.forEach(l => l.items.sort((a, b) => a.x - b.x));
 
   const anchorIdx = detectLedgerAnchors(lines);
-  if (anchorIdx.length >= Math.max(2, lines.length * 0.08)) {
-    return buildLedgerRows(lines, anchorIdx);
+  // The last page of a statement often carries a single transaction, which
+  // would fall under a purely proportional threshold and get parsed by the
+  // generic path — dragging the page's header/footer block into the table
+  // and mangling that last row. Accept a small anchor count too, provided
+  // every anchor line actually carries money cells (prose never does).
+  const anchorsWithMoney = anchorIdx.filter(i => lines[i].items.some(it => AMOUNT_RE.test(it.text))).length;
+  if (anchorIdx.length >= Math.max(2, lines.length * 0.08) ||
+      (anchorIdx.length >= 1 && anchorsWithMoney === anchorIdx.length)) {
+    const ledgerRows = buildLedgerRows(lines, anchorIdx);
+    // Flag the shape so the exporter knows these are real ledger rows
+    // (Tarih | Referans | Açıklama | amounts…) and can label the columns.
+    ledgerRows.isLedger = true;
+    return ledgerRows;
   }
 
   // Fallback: legacy Y-proximity clustering + global column boundaries,
@@ -1360,6 +1374,78 @@ function detectLedgerAnchors(lines) {
   return candidates.filter(c => Math.abs(c.x - dominantX) <= 6).map(c => c.i);
 }
 
+// ── Locate the money columns by their RIGHT edge ──────────────────────
+// Amount cells are right-aligned, so a cell's left edge slides with digit
+// count while its right edge stays put. That right edge is therefore what
+// identifies which money column ("Tutar", "Bakiye", …) a number belongs
+// to — and it keeps identifying it even when the number is too wide for
+// its cell and the bank spills it onto its own physical line (a wide
+// amount can render as three lines: sign, row baseline, digits).
+const AMOUNT_EDGE_TOL = 3;
+
+function detectAmountColumns(lines, anchorIdx) {
+  const edges = [];
+  anchorIdx.forEach(i => lines[i].items.forEach(it => {
+    if (AMOUNT_RE.test(it.text)) edges.push(it.x + (it.width || 0));
+  }));
+  if (!edges.length) return [];
+  edges.sort((a, b) => a - b);
+
+  const clusters = [];
+  edges.forEach(e => {
+    const last = clusters[clusters.length - 1];
+    if (last && e - last.sum / last.n <= AMOUNT_EDGE_TOL) { last.sum += e; last.n++; }
+    else clusters.push({ sum: e, n: 1 });
+  });
+
+  const minSeen = Math.max(1, anchorIdx.length * 0.3);
+  return clusters.filter(c => c.n >= minSeen).map(c => c.sum / c.n);
+}
+
+// Join two fragments of one money cell. A lone "-" is the sign of a number
+// that was rendered on a different line, so it glues on without a space.
+function mergeAmountText(existing, addition) {
+  if (!existing) return addition;
+  if (existing === '-' && AMOUNT_RE.test(addition)) return '-' + addition;
+  if (addition === '-' && AMOUNT_RE.test(existing)) return '-' + existing;
+  return existing + ' ' + addition;
+}
+
+// Split one physical line into (money cells by column, everything else).
+function splitAmountCells(items, amountCols) {
+  const amounts = new Array(amountCols.length).fill('');
+  const rest = [];
+  const consumed = new Set();
+
+  items.forEach((it, idx) => {
+    if (consumed.has(idx)) return;
+    const right = it.x + (it.width || 0);
+    let col = -1;
+    for (let c = 0; c < amountCols.length; c++) {
+      if (Math.abs(right - amountCols[c]) <= AMOUNT_EDGE_TOL) { col = c; break; }
+    }
+    if (col < 0) { rest.push(it); return; }
+
+    if (AMOUNT_RE.test(it.text)) {
+      let text = it.text;
+      // A negative sign is often its own item glued to the digits.
+      const prev = items[idx - 1];
+      if (prev && prev.text === '-' && it.x - (prev.x + (prev.width || 0)) <= GLUE_GAP) {
+        const at = rest.indexOf(prev);
+        if (at >= 0) { rest.splice(at, 1); text = '-' + text; consumed.add(idx - 1); }
+      }
+      amounts[col] = mergeAmountText(amounts[col], text);
+    } else if (it.text === '-') {
+      // Lone sign whose digits live on another line (or another page).
+      amounts[col] = mergeAmountText(amounts[col], '-');
+    } else {
+      rest.push(it);
+    }
+  });
+
+  return { amounts, rest };
+}
+
 // ── Build ledger rows: Tarih | Referans | Açıklama | Tutar | Bakiye | ... ──
 function buildLedgerRows(lines, anchorIdx) {
   const pitches = [];
@@ -1369,60 +1455,71 @@ function buildLedgerRows(lines, anchorIdx) {
   const maxDrift = Math.max(rowPitch * 0.45, 6); // how far a wrap line may sit from its row's anchor
 
   const groups = anchorIdx.map(i => ({ anchorLine: lines[i], wrapLines: [] }));
-  const anchorSet = new Set(anchorIdx);
+  const assigned = new Set(anchorIdx);
   lines.forEach((line, i) => {
-    if (anchorSet.has(i)) return;
+    if (assigned.has(i)) return;
     let best = -1, bestDist = Infinity;
     anchorIdx.forEach((ai, ri) => {
       const d = Math.abs(lines[ai].y - line.y);
       if (d < bestDist) { bestDist = d; best = ri; }
     });
-    if (best >= 0 && bestDist <= maxDrift) groups[best].wrapLines.push(line);
+    if (best >= 0 && bestDist <= maxDrift) { groups[best].wrapLines.push(line); assigned.add(i); }
   });
   groups.forEach(g => g.wrapLines.sort((a, b) => a.y - b.y));
 
-  return groups.map(g => {
+  const amountCols = detectAmountColumns(lines, anchorIdx);
+
+  // A too-wide amount can spill across a page break: the sign stays on the
+  // previous page and the digits land at the top of this one, belonging to
+  // no row here. Collect such stranded money cells so the caller can splice
+  // them back onto the row they came from.
+  const orphanHead = [];
+  if (amountCols.length) {
+    const firstAnchor = Math.min.apply(null, anchorIdx);
+    for (let i = 0; i < firstAnchor; i++) {
+      if (assigned.has(i)) continue;
+      const s = splitAmountCells(lines[i].items, amountCols);
+      if (s.rest.length || !s.amounts.some(a => a)) continue;
+      s.amounts.forEach((a, c) => { if (a) orphanHead.push({ col: c, text: a }); });
+    }
+  }
+
+  const built = groups.map(g => {
     const anchorItems = g.anchorLine.items; // already X-sorted
-    // Trailing amount tokens on the anchor line = Tutar, Bakiye (…): peel
-    // them off from the right by pattern, since they're right-aligned and
-    // their left edge shifts with digit count (not usable as a boundary).
-    // A negative amount's "-" sign is frequently its own glued text item
-    // (same kerning quirk as "11-12-" above), so it won't match AMOUNT_RE
-    // on its own — absorb it into the number it's glued to when found.
-    let end = anchorItems.length;
-    const trail = [];
-    while (end > 1 && AMOUNT_RE.test(anchorItems[end - 1].text)) {
-      let amt = anchorItems[end - 1].text;
-      let newEnd = end - 1;
-      if (newEnd > 1 && anchorItems[newEnd - 1].text === '-') {
-        const sign = anchorItems[newEnd - 1];
-        const num = anchorItems[end - 1];
-        if (num.x - (sign.x + sign.width) <= GLUE_GAP) { amt = '-' + amt; newEnd--; }
-      }
-      trail.unshift(amt);
-      end = newEnd;
+
+    if (!amountCols.length) {
+      // No money columns identified — keep the whole line as text.
+      const tarih0 = anchorItems[0].text;
+      const ref0 = anchorItems.length > 1 ? anchorItems[1].text : '';
+      const rest0 = [joinItemsText(anchorItems.slice(2))]
+        .concat(g.wrapLines.map(l => joinItemsText(l.items)))
+        .filter(t => t.trim()).join(' ');
+      return [tarih0, ref0, rest0].map(c => (c || '').trim());
     }
 
-    const tarih = anchorItems[0].text;
-    const referans = anchorItems.length > 1 ? anchorItems[1].text : '';
-    const anchorDesc = joinItemsText(anchorItems.slice(2, end));
+    // Pull every money cell out by column, from the anchor line and from
+    // each wrap line, so an amount that spilled onto its own line still
+    // lands in the right column instead of being swept into Açıklama.
+    const split = splitAmountCells(anchorItems, amountCols);
+    const amounts = split.amounts;
 
-    // A bank occasionally prints a bare "-" placeholder for an amount cell
-    // (e.g. Tutar) instead of "0,00" — since it's still short of the row's
-    // usual 2 trailing amounts, it ends up on its own wrap line rather than
-    // glued to the anchor. Recognize a trailing wrap line that's just a
-    // dash as that missing amount, not free-text description content.
-    const wrapLines = g.wrapLines.slice();
-    if (trail.length < 2 && wrapLines.length) {
-      const lastLine = wrapLines[wrapLines.length - 1];
-      if (joinItemsText(lastLine.items).trim() === '-') { wrapLines.pop(); trail.unshift('-'); }
-    }
+    const tarih = split.rest.length ? split.rest[0].text : '';
+    const referans = split.rest.length > 1 ? split.rest[1].text : '';
+    const descParts = [joinItemsText(split.rest.slice(2))];
 
-    const wrapText = wrapLines.map(l => joinItemsText(l.items)).join(' ');
-    const desc = [anchorDesc, wrapText].filter(Boolean).join(' ');
+    g.wrapLines.forEach(l => {
+      const w = splitAmountCells(l.items, amountCols);
+      w.amounts.forEach((a, c) => { if (a) amounts[c] = mergeAmountText(amounts[c], a); });
+      descParts.push(joinItemsText(w.rest));
+    });
 
-    return [tarih, referans, desc, ...trail].map(c => (c || '').trim());
+    const desc = descParts.filter(t => t.trim()).join(' ');
+
+    return [tarih, referans, desc, ...amounts].map(c => (c || '').trim());
   }).filter(r => r.some(c => c.trim()));
+
+  built.orphanHead = orphanHead;
+  return built;
 }
 
 // ── Detect column boundaries from all rows ───────────────────────────
@@ -1590,11 +1687,30 @@ async function smartBankExtract() {
 
     const rows = await extractFullPage(p);
     if (!rows || rows.length < 2) continue;
+    const isLedger = !!rows.isLedger; // survives only on the raw array
+
+    // Re-attach a money cell whose digits spilled over the page break onto
+    // the row it belongs to (that row lives on the previous page).
+    if (rows.orphanHead && rows.orphanHead.length && selections.length) {
+      const prevRows = selections[selections.length - 1].rows;
+      const lastRow = prevRows[prevRows.length - 1];
+      if (lastRow) {
+        rows.orphanHead.forEach(o => {
+          const ci = 3 + o.col; // Tarih | Referans | Açıklama | amounts…
+          if (ci >= lastRow.length) return;
+          const merged = mergeAmountText(lastRow[ci], o.text);
+          lastRow[ci] = bankOpts.numbers ? fixTurkishNumber(merged) : merged;
+        });
+      }
+    }
 
     // Bank-specific filtering: detect table rows (rows with multiple columns)
     const tableRows = filterBankTableRows(rows, currentBank);
 
-    if (tableRows.length > 1) {
+    // A page may legitimately hold a single transaction (typically the last
+    // one) — keep it when the ledger parser produced it, since that path
+    // has already established the row really is table data.
+    if (tableRows.length > 1 || (isLedger && tableRows.length === 1)) {
       const processed = postProcessRows(tableRows);
       selCounter++;
       selections.push({
@@ -1605,7 +1721,8 @@ async function smartBankExtract() {
         h: document.getElementById('pdfCanvas').height,
         rows: processed,
         label: `Sayfa ${p}`,
-        smart: true
+        smart: true,
+        ledger: isLedger
       });
     }
   }
@@ -1674,14 +1791,16 @@ async function autoExtractAll() {
     const page = await pdfDoc.getPage(p);
     const vp = page.getViewport({ scale: zoom });
     const rows = await extractRegion(p, 0, 0, vp.width, vp.height);
-    if (rows.length > 1) {
+    const isLedger = !!rows.isLedger; // survives only on the raw array
+    if (rows.length > 1 || (isLedger && rows.length === 1)) {
       selCounter++;
       selections.push({
         id: selCounter,
         page: p,
         x: 0, y: 0, w: vp.width, h: vp.height,
         rows: postProcessRows(rows),
-        label: `Sayfa ${p}`
+        label: `Sayfa ${p}`,
+        ledger: isLedger
       });
     }
   }
@@ -1774,69 +1893,124 @@ function formatDateForFile() {
   return `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}`;
 }
 
+// Column labels for date-anchored ledger data. The first three columns are
+// fixed; the trailing amount columns vary per bank (most print Tutar +
+// Bakiye, some print Borç + Alacak + Bakiye), so they're named by count.
+function ledgerHeaders(colCount) {
+  const head = ['İşlem Tarihi', 'Referans Kodu', 'Açıklama'];
+  const amountCols = Math.max(0, colCount - head.length);
+  if (amountCols === 2) head.push('Tutar', 'Bakiye');
+  else if (amountCols === 3) head.push('Borç', 'Alacak', 'Bakiye');
+  else for (let i = 1; i <= amountCols; i++) head.push(amountCols === 1 ? 'Tutar' : 'Tutar ' + i);
+  return head.slice(0, colCount);
+}
+
+// Turn an array of row-arrays into a worksheet, typing numeric cells as real
+// numbers and optionally prepending a header row.
+function buildSheet(rowArrays, isLedger) {
+  const body = rowArrays.map(r => [...r]);
+  const maxCols = Math.max(1, ...body.map(r => r.length));
+
+  if (bankOpts.header && isLedger && body.length) {
+    const head = ledgerHeaders(maxCols);
+    while (head.length < maxCols) head.push('');
+    body.unshift(head);
+  }
+
+  const norm = body.map(r => {
+    while (r.length < maxCols) r.push('');
+    return r;
+  });
+
+  // aoa_to_sheet types a cell purely by the JS value's typeof — a numeric
+  // string like "1186.19" (produced by fixTurkishNumber above) still
+  // lands in Excel as TEXT, not a real number, so it can't be summed or
+  // sorted. Convert cells that are plainly numeric (and only when the
+  // "Sayılar" number-fix option is on, since with it off a cell may still
+  // hold the original Turkish "1.234,56" formatting) into real numbers.
+  const AMOUNT_CELL_RE = /^-?\d+(\.\d+)?$/;
+  const sheetData = norm.map(row => row.map(cell => {
+    if (bankOpts.numbers && typeof cell === 'string' && AMOUNT_CELL_RE.test(cell)) {
+      const n = Number(cell);
+      if (Number.isFinite(n)) return n;
+    }
+    return cell;
+  }));
+
+  const ws = XLSX.utils.aoa_to_sheet(sheetData);
+
+  // Dates exported as text sort alphabetically ("01.12" before "02.01"),
+  // which is wrong across month boundaries — retype them as real Excel
+  // dates so a filter/sort on the date column behaves.
+  if (bankOpts.dates) {
+    const range = XLSX.utils.decode_range(ws['!ref']);
+    for (let R = range.s.r; R <= range.e.r; R++) {
+      for (let C = range.s.c; C <= range.e.c; C++) {
+        const addr = XLSX.utils.encode_cell({ r: R, c: C });
+        const cell = ws[addr];
+        if (!cell || cell.t !== 's') continue;
+        const m = /^(\d{2})\.(\d{2})\.(\d{4})$/.exec(cell.v);
+        if (!m) continue;
+        cell.t = 'd';
+        cell.v = new Date(Number(m[3]), Number(m[2]) - 1, Number(m[1]));
+        cell.z = 'dd.mm.yyyy';
+      }
+    }
+  }
+
+  // Smart column widths
+  const widths = [];
+  norm.forEach(row => row.forEach((cell, ci) => {
+    const l = String(cell == null ? '' : cell).length;
+    if (!widths[ci] || l > widths[ci]) widths[ci] = l;
+  }));
+  ws['!cols'] = widths.map(w => ({ wch: Math.min(Math.max((w || 6) + 2, 8), 50) }));
+
+  // Freeze the header row and switch on autofilter so the accountant can
+  // sort/filter the ledger straight away.
+  if (bankOpts.header && isLedger && body.length) {
+    ws['!freeze'] = { xSplit: 0, ySplit: 1 };
+    ws['!autofilter'] = { ref: ws['!ref'] };
+  }
+
+  return ws;
+}
+
 function doExport(sels, type, baseName) {
   const wb = XLSX.utils.book_new();
 
-  // Group by page for separate sheets
+  // Group by page (used for the per-page layout and the metadata sheet)
   const byPage = {};
   sels.forEach(s => {
     if (!byPage[s.page]) byPage[s.page] = [];
     byPage[s.page].push(s);
   });
 
-  Object.entries(byPage).forEach(([page, pageSels]) => {
-    const combined = [];
-
-    pageSels.forEach((s, idx) => {
-      if (idx > 0) combined.push([]);
-      s.rows.forEach(r => combined.push([...r]));
+  if (bankOpts.merge) {
+    // One continuous table — what an accountant actually wants: a single
+    // sheet they can filter, sum and import, instead of one sheet per PDF
+    // page (a 53-page statement otherwise exports as 53 separate sheets).
+    const allRows = [];
+    let anyLedger = false;
+    sels.forEach(s => {
+      if (s.ledger) anyLedger = true;
+      s.rows.forEach(r => allRows.push([...r]));
     });
-
-    // Normalize columns
-    const maxCols = Math.max(...combined.map(r => r.length));
-    const norm = combined.map(r => {
-      while (r.length < maxCols) r.push('');
-      return r;
+    const ws = buildSheet(allRows, anyLedger);
+    XLSX.utils.book_append_sheet(wb, ws, 'Hesap Hareketleri');
+  } else {
+    Object.entries(byPage).forEach(([page, pageSels]) => {
+      const combined = [];
+      let anyLedger = false;
+      pageSels.forEach((s, idx) => {
+        if (s.ledger) anyLedger = true;
+        if (idx > 0) combined.push([]);
+        s.rows.forEach(r => combined.push([...r]));
+      });
+      const ws = buildSheet(combined, anyLedger);
+      XLSX.utils.book_append_sheet(wb, ws, `Sayfa ${page}`.slice(0, 31));
     });
-
-    // aoa_to_sheet types a cell purely by the JS value's typeof — a numeric
-    // string like "1186.19" (produced by fixTurkishNumber above) still
-    // lands in Excel as TEXT, not a real number, so it can't be summed or
-    // sorted. Convert cells that are plainly numeric (and only when the
-    // "Sayılar" number-fix option is on, since with it off a cell may still
-    // hold the original Turkish "1.234,56" formatting) into real numbers.
-    const AMOUNT_CELL_RE = /^-?\d+(\.\d+)?$/;
-    const sheetData = norm.map(row => row.map(cell => {
-      if (bankOpts.numbers && typeof cell === 'string' && AMOUNT_CELL_RE.test(cell)) {
-        const n = Number(cell);
-        if (Number.isFinite(n)) return n;
-      }
-      return cell;
-    }));
-
-    const ws = XLSX.utils.aoa_to_sheet(sheetData);
-
-    // Apply header row styling if opted in
-    if (bankOpts.header && norm.length > 0) {
-      // Mark first row as bold via cell styles (xlsx lite doesn't support full styles, skip)
-    }
-
-    // Smart column widths
-    const widths = [];
-    norm.forEach(row => row.forEach((cell, ci) => {
-      const l = String(cell || '').length;
-      if (!widths[ci] || l > widths[ci]) widths[ci] = l;
-    }));
-    ws['!cols'] = widths.map(w => ({ wch: Math.min(Math.max((w || 6) + 2, 8), 50) }));
-
-    // Freeze first row if header mode
-    if (bankOpts.header) {
-      ws['!freeze'] = { xSplit: 0, ySplit: 1 };
-    }
-
-    const sheetName = `Sayfa ${page}`.slice(0, 31);
-    XLSX.utils.book_append_sheet(wb, ws, sheetName);
-  });
+  }
 
   // Add metadata sheet
   const metaWs = XLSX.utils.aoa_to_sheet([
@@ -1858,7 +2032,7 @@ function doExport(sels, type, baseName) {
     const base64 = b64EncodeUnicode(csv);
     saveFileToDisk(baseName + '.csv', base64, 'csv');
   } else {
-    const base64 = XLSX.write(wb, { bookType: 'xlsx', type: 'base64' });
+    const base64 = XLSX.write(wb, { bookType: 'xlsx', type: 'base64', cellDates: true });
     saveFileToDisk(baseName + '.xlsx', base64, 'xlsx');
   }
 }
