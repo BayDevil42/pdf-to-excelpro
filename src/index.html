@@ -1276,6 +1276,25 @@ async function extractFullPage(pageNum) {
 const DATE_RE = /^\d{1,2}[.\/-]\d{1,2}[.\/-]\d{2,4}$/;
 const AMOUNT_RE = /^-?\d{1,3}(\.\d{3})*,\d{2}$/;
 
+// Whitespace in the source PDF is often its own text item (str === ' '),
+// which gets dropped by the `.trim()` filter above along with every other
+// empty item. Re-joining the surviving items must not blindly insert a
+// space between every pair — many PDFs (this bank included) also split a
+// single token like "11-12-" into separate items ("11", "-", "12", "-")
+// with zero gap between them purely due to font kerning. Only insert a
+// space when the actual X gap between two items indicates one was there.
+const GLUE_GAP = 1;
+function joinItemsText(items) {
+  let out = '';
+  let prevEnd = null;
+  items.forEach(item => {
+    if (prevEnd !== null && item.x - prevEnd > GLUE_GAP) out += ' ';
+    out += item.text;
+    prevEnd = item.x + (item.width || 0);
+  });
+  return out;
+}
+
 function buildRowsFromItems(items, pageH, scale) {
   const rawItems = items.map(item => ({
     x: item.transform[4],
@@ -1367,14 +1386,39 @@ function buildLedgerRows(lines, anchorIdx) {
     // Trailing amount tokens on the anchor line = Tutar, Bakiye (…): peel
     // them off from the right by pattern, since they're right-aligned and
     // their left edge shifts with digit count (not usable as a boundary).
+    // A negative amount's "-" sign is frequently its own glued text item
+    // (same kerning quirk as "11-12-" above), so it won't match AMOUNT_RE
+    // on its own — absorb it into the number it's glued to when found.
     let end = anchorItems.length;
     const trail = [];
-    while (end > 1 && AMOUNT_RE.test(anchorItems[end - 1].text)) { trail.unshift(anchorItems[end - 1].text); end--; }
+    while (end > 1 && AMOUNT_RE.test(anchorItems[end - 1].text)) {
+      let amt = anchorItems[end - 1].text;
+      let newEnd = end - 1;
+      if (newEnd > 1 && anchorItems[newEnd - 1].text === '-') {
+        const sign = anchorItems[newEnd - 1];
+        const num = anchorItems[end - 1];
+        if (num.x - (sign.x + sign.width) <= GLUE_GAP) { amt = '-' + amt; newEnd--; }
+      }
+      trail.unshift(amt);
+      end = newEnd;
+    }
 
     const tarih = anchorItems[0].text;
     const referans = anchorItems.length > 1 ? anchorItems[1].text : '';
-    const anchorDesc = anchorItems.slice(2, end).map(it => it.text).join(' ');
-    const wrapText = g.wrapLines.map(l => l.items.map(it => it.text).join(' ')).join(' ');
+    const anchorDesc = joinItemsText(anchorItems.slice(2, end));
+
+    // A bank occasionally prints a bare "-" placeholder for an amount cell
+    // (e.g. Tutar) instead of "0,00" — since it's still short of the row's
+    // usual 2 trailing amounts, it ends up on its own wrap line rather than
+    // glued to the anchor. Recognize a trailing wrap line that's just a
+    // dash as that missing amount, not free-text description content.
+    const wrapLines = g.wrapLines.slice();
+    if (trail.length < 2 && wrapLines.length) {
+      const lastLine = wrapLines[wrapLines.length - 1];
+      if (joinItemsText(lastLine.items).trim() === '-') { wrapLines.pop(); trail.unshift('-'); }
+    }
+
+    const wrapText = wrapLines.map(l => joinItemsText(l.items)).join(' ');
     const desc = [anchorDesc, wrapText].filter(Boolean).join(' ');
 
     return [tarih, referans, desc, ...trail].map(c => (c || '').trim());
@@ -1430,6 +1474,7 @@ function assignToColumns(rowItems, colBoundaries) {
 
   // Create column slots
   const cols = new Array(colBoundaries.length).fill('');
+  const lastEnd = new Array(colBoundaries.length).fill(null);
 
   rowItems.forEach(item => {
     // Zone/band assignment: the item belongs to the last boundary at or
@@ -1441,12 +1486,12 @@ function assignToColumns(rowItems, colBoundaries) {
       if (colBoundaries[i] <= item.x + 0.5) bestCol = i; else break;
     }
 
-    // Append to column (handle multi-word cells)
-    if (cols[bestCol]) {
-      cols[bestCol] += ' ' + item.text;
-    } else {
-      cols[bestCol] = item.text;
-    }
+    // Append to column (handle multi-word cells) — only insert a space when
+    // the X gap shows there really was one (see joinItemsText above).
+    const prevEnd = lastEnd[bestCol];
+    const needsSpace = prevEnd !== null && item.x - prevEnd > GLUE_GAP;
+    cols[bestCol] = cols[bestCol] ? cols[bestCol] + (needsSpace ? ' ' : '') + item.text : item.text;
+    lastEnd[bestCol] = item.x + (item.width || 0);
   });
 
   return cols.map(c => c.trim());
@@ -1469,7 +1514,7 @@ function groupIntoColumns(items) {
       cols.push(cur.trim());
       cur = items[i].text;
     } else {
-      cur += ' ' + items[i].text;
+      cur += (gap > GLUE_GAP ? ' ' : '') + items[i].text;
     }
     lastX = items[i].x + (items[i].width || 0);
   }
@@ -1513,9 +1558,11 @@ function fixTurkishNumber(val) {
   const trNumRegex = /^-?[\d]{1,3}(?:\.[\d]{3})*(?:,[\d]{2})?(\s*(TL|₺|EUR|USD|\$|€))?$/;
   const cleaned = val.replace(/\s/g, '');
   if (trNumRegex.test(cleaned)) {
-    // Remove thousand separator dots, keep as text for proper Excel handling
-    // Return cleaned version — Excel will auto-detect
-    return val.replace(/(\d)\.(\d{3})/g, '$1$2').replace(',', '.');
+    // Strip every thousand-separator dot, then swap the decimal comma for a
+    // dot. (A regex that only strips one "\d.\d{3}" group at a time leaves
+    // amounts of a million or more, e.g. "1.835.439,01", half-converted —
+    // each match consumes the digit the next separator needed.)
+    return val.replace(/\./g, '').replace(',', '.');
   }
   return val;
 }
@@ -1752,7 +1799,22 @@ function doExport(sels, type, baseName) {
       return r;
     });
 
-    const ws = XLSX.utils.aoa_to_sheet(norm);
+    // aoa_to_sheet types a cell purely by the JS value's typeof — a numeric
+    // string like "1186.19" (produced by fixTurkishNumber above) still
+    // lands in Excel as TEXT, not a real number, so it can't be summed or
+    // sorted. Convert cells that are plainly numeric (and only when the
+    // "Sayılar" number-fix option is on, since with it off a cell may still
+    // hold the original Turkish "1.234,56" formatting) into real numbers.
+    const AMOUNT_CELL_RE = /^-?\d+(\.\d+)?$/;
+    const sheetData = norm.map(row => row.map(cell => {
+      if (bankOpts.numbers && typeof cell === 'string' && AMOUNT_CELL_RE.test(cell)) {
+        const n = Number(cell);
+        if (Number.isFinite(n)) return n;
+      }
+      return cell;
+    }));
+
+    const ws = XLSX.utils.aoa_to_sheet(sheetData);
 
     // Apply header row styling if opted in
     if (bankOpts.header && norm.length > 0) {
