@@ -1218,7 +1218,8 @@ document.addEventListener('mouseup', async e => {
     x: rx, y: ry, w: rw, h: rh,
     rows: processed,
     label: `S${currentPage}-#${selCounter}`,
-    ledger: isLedger
+    ledger: isLedger,
+    textColCount: rows.textColCount || 3
   };
   selections.push(sel);
   drawSavedSel(sel);
@@ -1255,7 +1256,7 @@ async function extractRegion(pageNum, rx, ry, rw, rh) {
 }
 
 // ── Full-page smart extraction ─────────────────────────────────────────
-async function extractFullPage(pageNum) {
+async function extractFullPage(pageNum, geometry) {
   const page = await pdfDoc.getPage(pageNum);
   const vp = page.getViewport({ scale: zoom });
   const content = await page.getTextContent();
@@ -1263,7 +1264,23 @@ async function extractFullPage(pageNum) {
   const pageH = vpNatural.height;
 
   if (!content.items.length) return [];
-  return buildRowsFromItems(content.items, pageH, zoom);
+  return buildRowsFromItems(content.items, pageH, zoom, geometry);
+}
+
+// Read every page once and learn the statement's column geometry from all
+// of them together, so pages with few transactions inherit the same column
+// layout as the rest instead of guessing their own.
+async function learnDocumentGeometry(onProgress) {
+  const allLines = [];
+  for (let p = 1; p <= pdfDoc.numPages; p++) {
+    if (onProgress) onProgress(p);
+    const page = await pdfDoc.getPage(p);
+    const content = await page.getTextContent();
+    if (!content.items.length) continue;
+    const pageH = page.getViewport({ scale: 1 }).height;
+    extractLines(content.items, pageH).forEach(l => allLines.push(l));
+  }
+  return learnLedgerGeometry(allLines);
 }
 
 // ── Shared row builder with advanced column alignment ─────────────────
@@ -1276,8 +1293,15 @@ async function extractFullPage(pageNum) {
 // first column we switch to an anchor-based parser: every physical line
 // whose first token is a date starts a new logical row, and any other line
 // gets folded into whichever anchor it sits closest to.
+// A bare date, and a date that carries a time in the same text item —
+// banks differ: "02.03.2026", "02.03.2026 14:28", "23/01/2026-15:39:19".
 const DATE_RE = /^\d{1,2}[.\/-]\d{1,2}[.\/-]\d{2,4}$/;
-const AMOUNT_RE = /^-?\d{1,3}(\.\d{3})*,\d{2}$/;
+const TIME_RE = /^\d{1,2}:\d{2}(:\d{2})?$/;
+const DATE_ANCHOR_RE = /^\d{1,2}[.\/-]\d{1,2}[.\/-]\d{2,4}(?:[\s-]+\d{1,2}:\d{2}(?::\d{2})?)?$/;
+// Money, allowing an explicit +/- sign and a currency suffix, both of which
+// Turkish statements use inconsistently ("1.186,19", "-14.182,00 TL", "+344,43 TL").
+const CURRENCY = '(?:TL|TRY|₺|USD|EUR|GBP|\\$|€|£)';
+const AMOUNT_RE = new RegExp('^[-+]?\\d{1,3}(?:\\.\\d{3})*,\\d{2}(?:\\s*' + CURRENCY + ')?$');
 
 // Whitespace in the source PDF is often its own text item (str === ' '),
 // which gets dropped by the `.trim()` filter above along with every other
@@ -1298,40 +1322,125 @@ function joinItemsText(items) {
   return out;
 }
 
-function buildRowsFromItems(items, pageH, scale) {
+// Fuse items that touch with no gap into the single token they visually
+// are. Some banks split one amount across items right at the decimal
+// comma ("-14.182" + ",00 TL"), which no amount pattern can match until
+// the pieces are put back together.
+function mergeGluedItems(items) {
+  const out = [];
+  items.forEach(item => {
+    const prev = out[out.length - 1];
+    if (prev && item.x - (prev.x + prev.width) <= GLUE_GAP) {
+      prev.text += item.text;
+      prev.width = (item.x + item.width) - prev.x;
+    } else {
+      out.push({ x: item.x, y: item.y, text: item.text, width: item.width });
+    }
+  });
+  return out;
+}
+
+// Turn one page's pdf.js text items into physical lines, left to right.
+function extractLines(items, pageH) {
   const rawItems = items.map(item => ({
     x: item.transform[4],
     y: Math.round((pageH - item.transform[5]) * 100) / 100,
     text: item.str,
     width: item.width || 0,
   })).filter(i => i.text.trim());
-
   if (!rawItems.length) return [];
   rawItems.sort((a, b) => a.y - b.y || a.x - b.x);
 
-  // 1) Cluster into physical lines (tight tolerance — same PDF text line only)
   const lines = [];
   rawItems.forEach(item => {
     const last = lines[lines.length - 1];
     if (last && Math.abs(item.y - last.y) <= 1.5) last.items.push(item);
     else lines.push({ y: item.y, items: [item] });
   });
-  lines.forEach(l => l.items.sort((a, b) => a.x - b.x));
+  lines.forEach(l => {
+    l.items.sort((a, b) => a.x - b.x);
+    l.items = mergeGluedItems(l.items);
+  });
+  return lines;
+}
 
-  const anchorIdx = detectLedgerAnchors(lines);
-  // The last page of a statement often carries a single transaction, which
-  // would fall under a purely proportional threshold and get parsed by the
-  // generic path — dragging the page's header/footer block into the table
-  // and mangling that last row. Accept a small anchor count too, provided
-  // every anchor line actually carries money cells (prose never does).
-  const anchorsWithMoney = anchorIdx.filter(i => lines[i].items.some(it => AMOUNT_RE.test(it.text))).length;
-  if (anchorIdx.length >= Math.max(2, lines.length * 0.08) ||
-      (anchorIdx.length >= 1 && anchorsWithMoney === anchorIdx.length)) {
-    const ledgerRows = buildLedgerRows(lines, anchorIdx);
-    // Flag the shape so the exporter knows these are real ledger rows
-    // (Tarih | Referans | Açıklama | amounts…) and can label the columns.
-    ledgerRows.isLedger = true;
-    return ledgerRows;
+// ── Learn the ledger's column geometry from the WHOLE statement ───────
+// A statement is one table split across pages, so its columns are the same
+// everywhere. Measuring them per page is unreliable: a page with few rows,
+// or one where no transaction happens to use a given column, yields a
+// different column count than its neighbours — and rows then disagree about
+// what each cell means. Measure once over every page instead.
+function learnLedgerGeometry(allLines) {
+  if (!allLines.length) return null;
+  const anchorIdx = detectLedgerAnchors(allLines);
+  if (anchorIdx.length < 2) return null;
+
+  const dateX = allLines[anchorIdx[0]].items[0].x;
+  const amountCols = detectAmountColumns(allLines, anchorIdx);
+
+  const anchorRests = [];
+  anchorIdx.forEach(i => {
+    const r = splitAmountCells(allLines[i].items, amountCols).rest;
+    if (r.length) anchorRests.push(r);
+  });
+  // Text columns live left of the money; anything detected at or beyond the
+  // first money column is a stray amount, not a column of its own.
+  const moneyStart = amountCols.length ? amountCols[0].lo : Infinity;
+  const textCols = detectTextColumns(anchorRests).filter(x => x < moneyStart);
+
+  // Typical distance between consecutive transactions, used to stop a page's
+  // header or footer block being swallowed into a neighbouring row.
+  const gaps = [];
+  for (let i = 1; i < anchorIdx.length; i++) {
+    const d = allLines[anchorIdx[i]].y - allLines[anchorIdx[i - 1]].y;
+    if (d > 0) gaps.push(d);
+  }
+  gaps.sort((a, b) => a - b);
+  const rowPitch = gaps.length ? gaps[Math.floor(gaps.length / 2)] : 20;
+
+  return { dateX, amountCols, textCols, rowPitch };
+}
+
+// Which lines on this page start a transaction, given the learned Tarih column.
+function anchorsForGeometry(lines, geom) {
+  const idx = [];
+  lines.forEach((l, i) => {
+    if (DATE_ANCHOR_RE.test(l.items[0].text) && Math.abs(l.items[0].x - geom.dateX) <= 6) idx.push(i);
+  });
+  return idx;
+}
+
+function buildRowsFromItems(items, pageH, scale, geometry) {
+  const lines = extractLines(items, pageH);
+  if (!lines.length) return [];
+  const rawItems = [];
+  lines.forEach(l => l.items.forEach(it => rawItems.push(it)));
+
+  if (geometry) {
+    const anchorIdx = anchorsForGeometry(lines, geometry);
+    if (anchorIdx.length) {
+      const ledgerRows = buildLedgerRows(lines, anchorIdx, geometry.amountCols, geometry.textCols, geometry.rowPitch);
+      ledgerRows.isLedger = true;
+      return ledgerRows;
+    }
+  } else {
+    const anchorIdx = detectLedgerAnchors(lines);
+    // The last page of a statement often carries a single transaction, which
+    // would fall under a purely proportional threshold and get parsed by the
+    // generic path — dragging the page's header/footer block into the table
+    // and mangling that last row. Accept a small anchor count too, provided
+    // every anchor line actually carries money cells (prose never does).
+    const anchorsWithMoney = anchorIdx.filter(i => lines[i].items.some(it => AMOUNT_RE.test(it.text))).length;
+    if (anchorIdx.length >= Math.max(2, lines.length * 0.08) ||
+        (anchorIdx.length >= 1 && anchorsWithMoney === anchorIdx.length)) {
+      const geom = learnLedgerGeometry(lines) ||
+        { dateX: lines[anchorIdx[0]].items[0].x, amountCols: detectAmountColumns(lines, anchorIdx), textCols: [] };
+      const ledgerRows = buildLedgerRows(lines, anchorIdx, geom.amountCols, geom.textCols, geom.rowPitch);
+      // Flag the shape so the exporter knows these are real ledger rows
+      // (Tarih | … | Açıklama | amounts…) and can label the columns.
+      ledgerRows.isLedger = true;
+      return ledgerRows;
+    }
   }
 
   // Fallback: legacy Y-proximity clustering + global column boundaries,
@@ -1358,7 +1467,7 @@ function buildRowsFromItems(items, pageH, scale) {
 // further right (the Açıklama column), so we keep only the dominant X.
 function detectLedgerAnchors(lines) {
   const candidates = [];
-  lines.forEach((l, i) => { if (DATE_RE.test(l.items[0].text)) candidates.push({ i, x: l.items[0].x }); });
+  lines.forEach((l, i) => { if (DATE_ANCHOR_RE.test(l.items[0].text)) candidates.push({ i, x: l.items[0].x }); });
   if (!candidates.length) return [];
 
   const xCounts = {};
@@ -1374,32 +1483,64 @@ function detectLedgerAnchors(lines) {
   return candidates.filter(c => Math.abs(c.x - dominantX) <= 6).map(c => c.i);
 }
 
-// ── Locate the money columns by their RIGHT edge ──────────────────────
-// Amount cells are right-aligned, so a cell's left edge slides with digit
-// count while its right edge stays put. That right edge is therefore what
-// identifies which money column ("Tutar", "Bakiye", …) a number belongs
-// to — and it keeps identifying it even when the number is too wide for
-// its cell and the bank spills it onto its own physical line (a wide
-// amount can render as three lines: sign, row baseline, digits).
-const AMOUNT_EDGE_TOL = 3;
+// ── Locate the money columns as horizontal bands ──────────────────────
+// Which edge of an amount cell stays put depends on the bank: right-aligned
+// figures share a right edge, but Ziraat Katılım centres them, so neither
+// edge is constant there. What always holds is that the figures of one
+// column occupy overlapping horizontal space and never reach into the next
+// column — so build each column as the span its amounts collectively cover,
+// and match by where a number's middle falls. This keeps working when a
+// number too wide for its cell spills onto its own line (a wide negative
+// can render as three lines: sign, row baseline, digits).
+const AMOUNT_EDGE_TOL = 2;
 
 function detectAmountColumns(lines, anchorIdx) {
-  const edges = [];
+  const spans = [];
   anchorIdx.forEach(i => lines[i].items.forEach(it => {
-    if (AMOUNT_RE.test(it.text)) edges.push(it.x + (it.width || 0));
+    if (AMOUNT_RE.test(it.text)) spans.push({ lo: it.x, hi: it.x + (it.width || 0) });
   }));
-  if (!edges.length) return [];
-  edges.sort((a, b) => a - b);
+  if (!spans.length) return [];
+  spans.sort((a, b) => a.lo - b.lo);
 
   const clusters = [];
-  edges.forEach(e => {
+  spans.forEach(s => {
     const last = clusters[clusters.length - 1];
-    if (last && e - last.sum / last.n <= AMOUNT_EDGE_TOL) { last.sum += e; last.n++; }
-    else clusters.push({ sum: e, n: 1 });
+    if (last && s.lo < last.hi) {
+      last.hi = Math.max(last.hi, s.hi);
+      last.n++;
+    } else {
+      clusters.push({ lo: s.lo, hi: s.hi, n: 1 });
+    }
   });
 
   const minSeen = Math.max(1, anchorIdx.length * 0.3);
-  return clusters.filter(c => c.n >= minSeen).map(c => c.sum / c.n);
+
+  // A money column contains figures and nothing else. A number that merely
+  // recurs inside the description (Garanti prints "… 05/15 K: 5,57" there)
+  // would otherwise pass as a column of its own and shift every real money
+  // column one place to the right, so require the band to be free of prose.
+  return clusters.filter(c => {
+    if (c.n < minSeen) return false;
+    let inBand = 0, figures = 0;
+    anchorIdx.forEach(i => lines[i].items.forEach(it => {
+      // Overlap, not centre: a long description reaching into the band is
+      // exactly the evidence that the band is not a column of its own, yet
+      // its midpoint lies far to the left.
+      if (it.x + (it.width || 0) <= c.lo + AMOUNT_EDGE_TOL || it.x >= c.hi - AMOUNT_EDGE_TOL) return;
+      inBand++;
+      if (AMOUNT_RE.test(it.text) || it.text === '-') figures++;
+    }));
+    return !inBand || figures / inBand >= 0.9;
+  }).map(c => ({ lo: c.lo, hi: c.hi }));
+}
+
+// Which money column, if any, a text item sits in.
+function amountColumnAt(item, amountCols) {
+  const mid = item.x + (item.width || 0) / 2;
+  for (let c = 0; c < amountCols.length; c++) {
+    if (mid >= amountCols[c].lo - AMOUNT_EDGE_TOL && mid <= amountCols[c].hi + AMOUNT_EDGE_TOL) return c;
+  }
+  return -1;
 }
 
 // Join two fragments of one money cell. A lone "-" is the sign of a number
@@ -1419,11 +1560,7 @@ function splitAmountCells(items, amountCols) {
 
   items.forEach((it, idx) => {
     if (consumed.has(idx)) return;
-    const right = it.x + (it.width || 0);
-    let col = -1;
-    for (let c = 0; c < amountCols.length; c++) {
-      if (Math.abs(right - amountCols[c]) <= AMOUNT_EDGE_TOL) { col = c; break; }
-    }
+    const col = amountColumnAt(it, amountCols);
     if (col < 0) { rest.push(it); return; }
 
     if (AMOUNT_RE.test(it.text)) {
@@ -1446,28 +1583,126 @@ function splitAmountCells(items, amountCols) {
   return { amounts, rest };
 }
 
-// ── Build ledger rows: Tarih | Referans | Açıklama | Tutar | Bakiye | ... ──
-function buildLedgerRows(lines, anchorIdx) {
-  const pitches = [];
-  for (let i = 1; i < anchorIdx.length; i++) pitches.push(lines[anchorIdx[i]].y - lines[anchorIdx[i - 1]].y);
-  pitches.sort((a, b) => a - b);
-  const rowPitch = pitches.length ? pitches[Math.floor(pitches.length / 2)] : 20;
-  const maxDrift = Math.max(rowPitch * 0.45, 6); // how far a wrap line may sit from its row's anchor
+// ── Group physical lines into one block per transaction ───────────────
+// Which lines belong to a transaction cannot be decided by "nearest date
+// line": banks align a wrapped Açıklama differently — Kuveyt Türk centres
+// it on the date, İş Bankası ends it on the date — so the same distance
+// means different things. What is consistent is spacing: lines *inside* a
+// transaction sit closer together than consecutive transactions do. So we
+// split on the vertical gap, taking the threshold from the largest jump in
+// the sorted gap values rather than any fixed number of points.
+// Rather than guess the gap that separates transactions — banks space their
+// wrapped description lines very differently, and any fixed guess over-splits
+// one statement while merging rows of another — derive it from the one thing
+// we already know must hold: a transaction contains exactly one date line.
+// So take the widest gap threshold that still leaves every date line alone in
+// its block, which captures as much of each description as possible without
+// ever running two transactions together.
+function splitLinesIntoBlocks(lines, anchorSet) {
+  if (lines.length < 3 || !anchorSet || !anchorSet.size) return null;
 
+  const gaps = [];
+  for (let i = 1; i < lines.length; i++) gaps.push(lines[i].y - lines[i - 1].y);
+
+  const isolatesEveryAnchor = t => {
+    let inBlock = 0;
+    for (let i = 0; i < lines.length; i++) {
+      if (i > 0 && gaps[i - 1] > t) inBlock = 0;
+      if (anchorSet.has(i) && ++inBlock > 1) return false;
+    }
+    return true;
+  };
+
+  // Lines inside a transaction sit closer together than consecutive
+  // transactions do, so the gap values fall into two groups; cut at the
+  // widest proportional jump between them. Anything that would put two
+  // dates in one block is rejected outright.
+  const sorted = gaps.slice().sort((a, b) => a - b);
+  let bestRatio = 1, threshold;
+  for (let i = 1; i < sorted.length; i++) {
+    if (sorted[i - 1] <= 0.5) continue;
+    const ratio = sorted[i] / sorted[i - 1];
+    const t = (sorted[i] + sorted[i - 1]) / 2;
+    if (ratio > bestRatio && isolatesEveryAnchor(t)) { bestRatio = ratio; threshold = t; }
+  }
+  // Evenly spaced lines (every row a single line) show no such jump —
+  // there are no multi-line blocks to find.
+  if (threshold === undefined || bestRatio < 1.3) return null;
+
+  const blocks = [[0]];
+  for (let i = 1; i < lines.length; i++) {
+    if (gaps[i - 1] > threshold) blocks.push([i]);
+    else blocks[blocks.length - 1].push(i);
+  }
+  return blocks;
+}
+
+// ── Build ledger rows: Tarih | … | Açıklama | Tutar | Bakiye | … ──────
+function buildLedgerRows(lines, anchorIdx, amountCols, textCols, rowPitch) {
+  const anchorSet = new Set(anchorIdx);
   const groups = anchorIdx.map(i => ({ anchorLine: lines[i], wrapLines: [] }));
+  const groupOfAnchor = new Map(anchorIdx.map((li, gi) => [li, gi]));
   const assigned = new Set(anchorIdx);
-  lines.forEach((line, i) => {
-    if (assigned.has(i)) return;
-    let best = -1, bestDist = Infinity;
-    anchorIdx.forEach((ai, ri) => {
-      const d = Math.abs(lines[ai].y - line.y);
-      if (d < bestDist) { bestDist = d; best = ri; }
-    });
-    if (best >= 0 && bestDist <= maxDrift) { groups[best].wrapLines.push(line); assigned.add(i); }
-  });
-  groups.forEach(g => g.wrapLines.sort((a, b) => a.y - b.y));
 
-  const amountCols = detectAmountColumns(lines, anchorIdx);
+  const blocks = splitLinesIntoBlocks(lines, anchorSet);
+  const blockOf = blocks && blocks.filter(b => b.some(i => anchorSet.has(i)));
+
+  if (blockOf && blockOf.length === anchorIdx.length) {
+    // Clean case: exactly one date line per block — the block *is* the row.
+    // A page holding a single transaction has no neighbouring row to bound
+    // its block, so an adjacent header or footer can fall inside it. Bound
+    // membership by the statement's usual row height instead.
+    const reach = (rowPitch || 20) * 1.5;
+    blockOf.forEach(block => {
+      const anchorLine = block.find(i => anchorSet.has(i));
+      const gi = groupOfAnchor.get(anchorLine);
+      block.forEach(i => {
+        if (i === anchorLine) return;
+        if (Math.abs(lines[i].y - lines[anchorLine].y) > reach) return;
+        groups[gi].wrapLines.push(lines[i]);
+        assigned.add(i);
+      });
+    });
+  } else {
+    // Fall back to nearest-date assignment, bounded by half a row pitch.
+    const pitches = [];
+    for (let i = 1; i < anchorIdx.length; i++) pitches.push(lines[anchorIdx[i]].y - lines[anchorIdx[i - 1]].y);
+    pitches.sort((a, b) => a - b);
+    const rowPitch = pitches.length ? pitches[Math.floor(pitches.length / 2)] : 20;
+    const maxDrift = Math.max(rowPitch * 0.45, 6);
+
+    lines.forEach((line, i) => {
+      if (assigned.has(i)) return;
+      let best = -1, bestDist = Infinity;
+      anchorIdx.forEach((ai, ri) => {
+        const d = Math.abs(lines[ai].y - line.y);
+        if (d < bestDist) { bestDist = d; best = ri; }
+      });
+      if (best >= 0 && bestDist <= maxDrift) { groups[best].wrapLines.push(line); assigned.add(i); }
+    });
+  }
+  // A line holding nothing but figures cannot be a transaction of its own —
+  // it is an amount that did not fit on its row's line. Whichever way the
+  // blocks came out, attach it to the nearest date line.
+  if (amountCols.length) {
+    const reach = (rowPitch || 20) * 0.75;
+    const firstAnchorLine = Math.min.apply(null, anchorIdx);
+    lines.forEach((line, i) => {
+      // Figures above the page's first transaction belong to the row that
+      // ended on the previous page; they are handled as orphans below.
+      if (assigned.has(i) || i < firstAnchorLine) return;
+      const s = splitAmountCells(line.items, amountCols);
+      if (s.rest.length || !s.amounts.some(a => a)) return;
+      let best = -1, bestDist = Infinity;
+      anchorIdx.forEach((ai, ri) => {
+        const d = Math.abs(lines[ai].y - line.y);
+        if (d < bestDist) { bestDist = d; best = ri; }
+      });
+      if (best >= 0 && bestDist <= reach) { groups[best].wrapLines.push(line); assigned.add(i); }
+    });
+  }
+
+  groups.forEach(g => g.wrapLines.sort((a, b) => a.y - b.y));
 
   // A too-wide amount can spill across a page break: the sign stays on the
   // previous page and the digits land at the top of this one, belonging to
@@ -1485,41 +1720,96 @@ function buildLedgerRows(lines, anchorIdx) {
   }
 
   const built = groups.map(g => {
-    const anchorItems = g.anchorLine.items; // already X-sorted
+    const amounts = new Array(amountCols.length).fill('');
+    const cells = new Array(Math.max(1, textCols.length)).fill('');
 
-    if (!amountCols.length) {
-      // No money columns identified — keep the whole line as text.
-      const tarih0 = anchorItems[0].text;
-      const ref0 = anchorItems.length > 1 ? anchorItems[1].text : '';
-      const rest0 = [joinItemsText(anchorItems.slice(2))]
-        .concat(g.wrapLines.map(l => joinItemsText(l.items)))
-        .filter(t => t.trim()).join(' ');
-      return [tarih0, ref0, rest0].map(c => (c || '').trim());
-    }
-
-    // Pull every money cell out by column, from the anchor line and from
-    // each wrap line, so an amount that spilled onto its own line still
-    // lands in the right column instead of being swept into Açıklama.
-    const split = splitAmountCells(anchorItems, amountCols);
-    const amounts = split.amounts;
-
-    const tarih = split.rest.length ? split.rest[0].text : '';
-    const referans = split.rest.length > 1 ? split.rest[1].text : '';
-    const descParts = [joinItemsText(split.rest.slice(2))];
-
-    g.wrapLines.forEach(l => {
-      const w = splitAmountCells(l.items, amountCols);
-      w.amounts.forEach((a, c) => { if (a) amounts[c] = mergeAmountText(amounts[c], a); });
-      descParts.push(joinItemsText(w.rest));
+    // Walk the transaction's lines top to bottom so a wrapped description
+    // reads in source order, whether the bank puts the overflow above the
+    // date line or below it. The date needs no special case: it simply
+    // falls into the leftmost column like any other item.
+    [g.anchorLine].concat(g.wrapLines).sort((a, b) => a.y - b.y).forEach(l => {
+      const s = splitAmountCells(l.items, amountCols);
+      s.amounts.forEach((a, c) => { if (a) amounts[c] = mergeAmountText(amounts[c], a); });
+      if (!s.rest.length) return;
+      if (!textCols.length) {
+        cells[0] = cells[0] ? cells[0] + ' ' + joinItemsText(s.rest) : joinItemsText(s.rest);
+        return;
+      }
+      assignToColumns(s.rest, textCols).forEach((t, ci) => {
+        if (t) cells[ci] = cells[ci] ? cells[ci] + ' ' + t : t;
+      });
     });
 
-    const desc = descParts.filter(t => t.trim()).join(' ');
-
-    return [tarih, referans, desc, ...amounts].map(c => (c || '').trim());
+    return cells.concat(amounts).map(c => (c || '').trim());
   }).filter(r => r.some(c => c.trim()));
 
   built.orphanHead = orphanHead;
+  built.textColCount = Math.max(1, textCols.length);
   return built;
+}
+
+// ── Detect the text columns left of the money ────────────────────────
+// Counting where items start is not enough on its own: a centred Açıklama
+// begins at a different X on every line, and those stray starts look like
+// column edges. What separates a real column gutter from a coincidence is
+// that no text ever crosses a gutter — so a candidate is only accepted
+// when practically no item spans it.
+function detectTextColumns(rowItemArrays) {
+  if (!rowItemArrays.length) return [];
+
+  // Bin the starts to group them, but remember each bin's true leftmost X —
+  // the rounded bin value can sit a fraction to the right of the real column
+  // edge, which is enough to throw that cell into the previous column.
+  const starts = {};
+  rowItemArrays.forEach(items => items.forEach((it, idx) => {
+    const prev = items[idx - 1];
+    const gap = prev ? it.x - (prev.x + prev.width) : Infinity;
+    if (gap > 8) {
+      const bin = Math.round(it.x / 2) * 2;
+      const slot = starts[bin] || (starts[bin] = { n: 0, minX: it.x });
+      slot.n++;
+      if (it.x < slot.minX) slot.minX = it.x;
+    }
+  }));
+
+  const minStarts = Math.max(2, rowItemArrays.length * 0.02);
+  const maxCrossings = Math.max(0, rowItemArrays.length * 0.01);
+
+  const kept = Object.values(starts)
+    .filter(s => s.n >= minStarts)
+    .map(s => s.minX)
+    .filter(x => {
+      let crossings = 0;
+      for (const items of rowItemArrays) {
+        for (const it of items) {
+          if (it.x < x - 1 && it.x + it.width > x + 1) {
+            if (++crossings > maxCrossings) return false;
+          }
+        }
+      }
+      return true;
+    })
+    .sort((a, b) => a - b);
+
+  const merged = [];
+  kept.forEach(x => { if (!merged.length || x - merged[merged.length - 1] > 8) merged.push(x); });
+
+  // Move each boundary into the middle of the gutter it names. A column
+  // whose content is centred (reference codes often are) starts at a
+  // different X on every row, so anchoring the boundary on any one of those
+  // starts throws the shorter ones into the previous column. Since nothing
+  // crosses a boundary, the true gap is [end of what is left, start of what
+  // is right] and its midpoint separates them whatever their alignment.
+  return merged.map((b, bi) => {
+    if (bi === 0) return b;
+    let left = -Infinity, right = Infinity;
+    rowItemArrays.forEach(items => items.forEach(it => {
+      const end = it.x + it.width;
+      if (end <= b + 1) { if (end > left) left = end; }
+      else if (it.x >= b - 1) { if (it.x < right) right = it.x; }
+    }));
+    return (left > -Infinity && right < Infinity && left < right) ? (left + right) / 2 : b;
+  });
 }
 
 // ── Detect column boundaries from all rows ───────────────────────────
@@ -1652,14 +1942,20 @@ function postProcessRows(rows) {
 
 function fixTurkishNumber(val) {
   // Match Turkish currency: 1.234,56 or -1.234,56 or 1.234,56 TL
-  const trNumRegex = /^-?[\d]{1,3}(?:\.[\d]{3})*(?:,[\d]{2})?(\s*(TL|₺|EUR|USD|\$|€))?$/;
+  const trNumRegex = new RegExp('^[-+]?\\d{1,3}(?:\\.\\d{3})*(?:,\\d{2})?' + CURRENCY + '?$');
   const cleaned = val.replace(/\s/g, '');
   if (trNumRegex.test(cleaned)) {
-    // Strip every thousand-separator dot, then swap the decimal comma for a
-    // dot. (A regex that only strips one "\d.\d{3}" group at a time leaves
-    // amounts of a million or more, e.g. "1.835.439,01", half-converted —
-    // each match consumes the digit the next separator needed.)
-    return val.replace(/\./g, '').replace(',', '.');
+    // Drop the currency suffix and any leading "+" — a cell still carrying
+    // "TL" cannot be written to Excel as a number, so it would land as text
+    // and stay unsummable. Then strip every thousand-separator dot and swap
+    // the decimal comma for a dot. (A regex that only strips one
+    // "\d.\d{3}" group at a time leaves amounts of a million or more, e.g.
+    // "1.835.439,01", half-converted — each match consumes the digit the
+    // next separator needed.)
+    return cleaned.replace(new RegExp(CURRENCY + '$'), '')
+                  .replace(/^\+/, '')
+                  .replace(/\./g, '')
+                  .replace(',', '.');
   }
   return val;
 }
@@ -1681,22 +1977,27 @@ async function smartBankExtract() {
   selections = selections.filter(s => false);
   selCounter = 0;
 
+  const geometry = await learnDocumentGeometry(p => {
+    setLoadingText(`Sütun yapısı çözümleniyor — sayfa ${p}/${pdfDoc.numPages}...`);
+    setProgress((p / pdfDoc.numPages) * 40);
+  });
+
   for (let p = 1; p <= pdfDoc.numPages; p++) {
     setLoadingText(`Sayfa ${p}/${pdfDoc.numPages} analiz ediliyor...`);
-    setProgress(((p-1) / pdfDoc.numPages) * 100);
+    setProgress(40 + ((p - 1) / pdfDoc.numPages) * 60);
 
-    const rows = await extractFullPage(p);
+    const rows = await extractFullPage(p, geometry);
     if (!rows || rows.length < 2) continue;
     const isLedger = !!rows.isLedger; // survives only on the raw array
 
     // Re-attach a money cell whose digits spilled over the page break onto
     // the row it belongs to (that row lives on the previous page).
     if (rows.orphanHead && rows.orphanHead.length && selections.length) {
-      const prevRows = selections[selections.length - 1].rows;
-      const lastRow = prevRows[prevRows.length - 1];
+      const prevSel = selections[selections.length - 1];
+      const lastRow = prevSel.rows[prevSel.rows.length - 1];
       if (lastRow) {
         rows.orphanHead.forEach(o => {
-          const ci = 3 + o.col; // Tarih | Referans | Açıklama | amounts…
+          const ci = (prevSel.textColCount || 3) + o.col; // text columns, then money
           if (ci >= lastRow.length) return;
           const merged = mergeAmountText(lastRow[ci], o.text);
           lastRow[ci] = bankOpts.numbers ? fixTurkishNumber(merged) : merged;
@@ -1722,7 +2023,8 @@ async function smartBankExtract() {
         rows: processed,
         label: `Sayfa ${p}`,
         smart: true,
-        ledger: isLedger
+        ledger: isLedger,
+        textColCount: rows.textColCount || 3
       });
     }
   }
@@ -1800,7 +2102,8 @@ async function autoExtractAll() {
         x: 0, y: 0, w: vp.width, h: vp.height,
         rows: postProcessRows(rows),
         label: `Sayfa ${p}`,
-        ledger: isLedger
+        ledger: isLedger,
+        textColCount: rows.textColCount || 3
       });
     }
   }
@@ -1893,26 +2196,116 @@ function formatDateForFile() {
   return `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}`;
 }
 
-// Column labels for date-anchored ledger data. The first three columns are
-// fixed; the trailing amount columns vary per bank (most print Tutar +
-// Bakiye, some print Borç + Alacak + Bakiye), so they're named by count.
-function ledgerHeaders(colCount) {
-  const head = ['İşlem Tarihi', 'Referans Kodu', 'Açıklama'];
-  const amountCols = Math.max(0, colCount - head.length);
-  if (amountCols === 2) head.push('Tutar', 'Bakiye');
-  else if (amountCols === 3) head.push('Borç', 'Alacak', 'Bakiye');
-  else for (let i = 1; i <= amountCols; i++) head.push(amountCols === 1 ? 'Tutar' : 'Tutar ' + i);
-  return head.slice(0, colCount);
+// Column labels for date-anchored ledger data. Neither the number of text
+// columns nor the number of money columns is fixed across banks (some carry
+// a Valör date or a time-of-day, some print Borç + Alacak instead of a
+// single Tutar), so the labels are derived from what each column holds.
+function ledgerHeaders(rows, textColCount, colCount) {
+  const share = (ci, test) => {
+    let seen = 0, hit = 0;
+    rows.forEach(r => {
+      const v = (r[ci] == null ? '' : String(r[ci])).trim();
+      if (!v) return;
+      seen++;
+      if (test(v)) hit++;
+    });
+    return seen ? hit / seen : 0;
+  };
+  const avgLen = ci => {
+    let seen = 0, total = 0;
+    rows.forEach(r => {
+      const v = (r[ci] == null ? '' : String(r[ci])).trim();
+      if (!v) return;
+      seen++; total += v.length;
+    });
+    return seen ? total / seen : 0;
+  };
+
+  const head = new Array(colCount).fill('');
+  head[0] = 'İşlem Tarihi';
+
+  // Middle text columns: a second date is a value date, a bare clock time is
+  // the transaction time, and of what is left the wordiest column is the
+  // description — the narrower ones are reference/《info》 codes.
+  const plain = [];
+  for (let ci = 1; ci < textColCount && ci < colCount; ci++) {
+    if (share(ci, v => DATE_ANCHOR_RE.test(v)) > 0.6) head[ci] = 'Valör Tarihi';
+    else if (share(ci, v => TIME_RE.test(v)) > 0.6) head[ci] = 'Saat';
+    else plain.push(ci);
+  }
+  if (plain.length) {
+    let widest = plain[0];
+    plain.forEach(ci => { if (avgLen(ci) > avgLen(widest)) widest = ci; });
+    let n = 0;
+    plain.forEach(ci => {
+      if (ci === widest) head[ci] = 'Açıklama';
+      else head[ci] = plain.length > 2 ? 'Bilgi ' + (++n) : 'Referans';
+    });
+  }
+
+  // Money columns. Their count alone does not say which is which — İş
+  // Bankası prints a third, always-zero figure after the balance, so
+  // "the last one is Bakiye" is wrong there. Instead find the pair that
+  // demonstrably behaves like an amount and its running balance: a
+  // statement satisfies Bakiye[n] = Bakiye[n-1] + Tutar[n], mirrored when
+  // the rows run newest first. Those two are then labelled from evidence.
+  const moneyIdx = [];
+  for (let ci = textColCount; ci < colCount; ci++) moneyIdx.push(ci);
+
+  const num = v => {
+    if (typeof v === 'number') return v;
+    const s = String(v == null ? '' : v).trim();
+    return /^-?\d+(\.\d+)?$/.test(s) ? Number(s) : null;
+  };
+  const runsAsBalance = (ai, bi) => {
+    const pairs = rows.map(r => ({ a: num(r[ai]), b: num(r[bi]) }))
+                      .filter(p => p.a !== null && p.b !== null);
+    if (pairs.length < 4) return false;
+    let asc = 0, dsc = 0;
+    for (let i = 1; i < pairs.length; i++) {
+      if (Math.abs(pairs[i - 1].b + pairs[i].a - pairs[i].b) <= 0.011) asc++;
+      if (Math.abs(pairs[i].b + pairs[i - 1].a - pairs[i - 1].b) <= 0.011) dsc++;
+    }
+    return Math.max(asc, dsc) / (pairs.length - 1) >= 0.9;
+  };
+
+  let tutarI = -1, bakiyeI = -1;
+  for (const bi of moneyIdx) {
+    for (const ai of moneyIdx) {
+      if (ai !== bi && runsAsBalance(ai, bi)) { tutarI = ai; bakiyeI = bi; break; }
+    }
+    if (tutarI >= 0) break;
+  }
+
+  if (tutarI >= 0) {
+    head[tutarI] = 'Tutar';
+    head[bakiyeI] = 'Bakiye';
+    let extra = 0;
+    moneyIdx.forEach(ci => {
+      if (ci === tutarI || ci === bakiyeI) return;
+      extra++;
+      head[ci] = extra > 1 ? 'Diğer Tutar ' + extra : 'Diğer Tutar';
+    });
+  } else {
+    const n = moneyIdx.length;
+    const fallback = n === 1 ? ['Tutar']
+      : n === 2 ? ['Tutar', 'Bakiye']
+      : n === 3 ? ['Borç', 'Alacak', 'Bakiye']
+      : moneyIdx.map((_, i) => 'Tutar ' + (i + 1));
+    moneyIdx.forEach((ci, i) => { head[ci] = fallback[i] || 'Tutar ' + (i + 1); });
+  }
+
+  return head;
 }
 
 // Turn an array of row-arrays into a worksheet, typing numeric cells as real
 // numbers and optionally prepending a header row.
-function buildSheet(rowArrays, isLedger) {
+function buildSheet(rowArrays, isLedger, textColCount) {
   const body = rowArrays.map(r => [...r]);
   const maxCols = Math.max(1, ...body.map(r => r.length));
 
   if (bankOpts.header && isLedger && body.length) {
-    const head = ledgerHeaders(maxCols);
+    const head = ledgerHeaders(body, textColCount || 3, maxCols);
     while (head.length < maxCols) head.push('');
     body.unshift(head);
   }
@@ -1949,11 +2342,15 @@ function buildSheet(rowArrays, isLedger) {
         const addr = XLSX.utils.encode_cell({ r: R, c: C });
         const cell = ws[addr];
         if (!cell || cell.t !== 's') continue;
-        const m = /^(\d{2})\.(\d{2})\.(\d{4})$/.exec(cell.v);
+        // Some banks stamp the time of day into the same cell as the date
+        // ("02.03.2026 14:28", "23/01/2026-15:39:19") — keep it.
+        const m = /^(\d{1,2})[.\/-](\d{1,2})[.\/-](\d{4})(?:[\s-]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/.exec(cell.v);
         if (!m) continue;
+        const withTime = m[4] !== undefined;
         cell.t = 'd';
-        cell.v = new Date(Number(m[3]), Number(m[2]) - 1, Number(m[1]));
-        cell.z = 'dd.mm.yyyy';
+        cell.v = new Date(+m[3], +m[2] - 1, +m[1],
+                          withTime ? +m[4] : 0, withTime ? +m[5] : 0, withTime && m[6] ? +m[6] : 0);
+        cell.z = withTime ? 'dd.mm.yyyy hh:mm' : 'dd.mm.yyyy';
       }
     }
   }
@@ -1991,23 +2388,23 @@ function doExport(sels, type, baseName) {
     // sheet they can filter, sum and import, instead of one sheet per PDF
     // page (a 53-page statement otherwise exports as 53 separate sheets).
     const allRows = [];
-    let anyLedger = false;
+    let anyLedger = false, textColCount = 3;
     sels.forEach(s => {
-      if (s.ledger) anyLedger = true;
+      if (s.ledger && !anyLedger) { anyLedger = true; textColCount = s.textColCount || 3; }
       s.rows.forEach(r => allRows.push([...r]));
     });
-    const ws = buildSheet(allRows, anyLedger);
+    const ws = buildSheet(allRows, anyLedger, textColCount);
     XLSX.utils.book_append_sheet(wb, ws, 'Hesap Hareketleri');
   } else {
     Object.entries(byPage).forEach(([page, pageSels]) => {
       const combined = [];
-      let anyLedger = false;
+      let anyLedger = false, textColCount = 3;
       pageSels.forEach((s, idx) => {
-        if (s.ledger) anyLedger = true;
+        if (s.ledger && !anyLedger) { anyLedger = true; textColCount = s.textColCount || 3; }
         if (idx > 0) combined.push([]);
         s.rows.forEach(r => combined.push([...r]));
       });
-      const ws = buildSheet(combined, anyLedger);
+      const ws = buildSheet(combined, anyLedger, textColCount);
       XLSX.utils.book_append_sheet(wb, ws, `Sayfa ${page}`.slice(0, 31));
     });
   }
