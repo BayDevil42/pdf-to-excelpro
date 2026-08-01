@@ -1302,6 +1302,9 @@ const DATE_ANCHOR_RE = /^\d{1,2}[.\/-]\d{1,2}[.\/-]\d{2,4}(?:[\s-]+\d{1,2}:\d{2}
 // Turkish statements use inconsistently ("1.186,19", "-14.182,00 TL", "+344,43 TL").
 const CURRENCY = '(?:TL|TRY|₺|USD|EUR|GBP|\\$|€|£)';
 const AMOUNT_RE = new RegExp('^[-+]?\\d{1,3}(?:\\.\\d{3})*,\\d{2}(?:\\s*' + CURRENCY + ')?$');
+// Some banks set the currency as its own text item a couple of points after
+// the figure, too far to be glued to it but still part of that money cell.
+const CURRENCY_ONLY_RE = new RegExp('^' + CURRENCY + '$');
 
 // Whitespace in the source PDF is often its own text item (str === ' '),
 // which gets dropped by the `.trim()` filter above along with every other
@@ -1560,6 +1563,15 @@ function splitAmountCells(items, amountCols) {
 
   items.forEach((it, idx) => {
     if (consumed.has(idx)) return;
+
+    // A currency printed just after a figure belongs to that money cell, not
+    // to the description it would otherwise be appended to.
+    if (CURRENCY_ONLY_RE.test(it.text)) {
+      const prev = items[idx - 1];
+      if (prev && AMOUNT_RE.test(prev.text) && amountColumnAt(prev, amountCols) >= 0
+          && it.x - (prev.x + (prev.width || 0)) <= 4) return;
+    }
+
     const col = amountColumnAt(it, amountCols);
     if (col < 0) { rest.push(it); return; }
 
@@ -1604,37 +1616,48 @@ function splitLinesIntoBlocks(lines, anchorSet) {
   const gaps = [];
   for (let i = 1; i < lines.length; i++) gaps.push(lines[i].y - lines[i - 1].y);
 
-  const isolatesEveryAnchor = t => {
-    let inBlock = 0;
-    for (let i = 0; i < lines.length; i++) {
-      if (i > 0 && gaps[i - 1] > t) inBlock = 0;
-      if (anchorSet.has(i) && ++inBlock > 1) return false;
+  const blocksAt = t => {
+    const blocks = [[0]];
+    for (let i = 1; i < lines.length; i++) {
+      if (gaps[i - 1] > t) blocks.push([i]);
+      else blocks[blocks.length - 1].push(i);
     }
-    return true;
+    return blocks;
   };
 
-  // Lines inside a transaction sit closer together than consecutive
-  // transactions do, so the gap values fall into two groups; cut at the
-  // widest proportional jump between them. Anything that would put two
-  // dates in one block is rejected outright.
-  const sorted = gaps.slice().sort((a, b) => a - b);
-  let bestRatio = 1, threshold;
-  for (let i = 1; i < sorted.length; i++) {
-    if (sorted[i - 1] <= 0.5) continue;
-    const ratio = sorted[i] / sorted[i - 1];
-    const t = (sorted[i] + sorted[i - 1]) / 2;
-    if (ratio > bestRatio && isolatesEveryAnchor(t)) { bestRatio = ratio; threshold = t; }
-  }
-  // Evenly spaced lines (every row a single line) show no such jump —
-  // there are no multi-line blocks to find.
-  if (threshold === undefined || bestRatio < 1.3) return null;
+  const anchorsSorted = Array.from(anchorSet).sort((a, b) => a - b);
+  const firstAnchor = anchorsSorted[0];
+  const lastAnchor = anchorsSorted[anchorsSorted.length - 1];
 
-  const blocks = [[0]];
-  for (let i = 1; i < lines.length; i++) {
-    if (gaps[i - 1] > threshold) blocks.push([i]);
-    else blocks[blocks.length - 1].push(i);
+  // Judge a candidate cut by what it costs: reject outright anything that
+  // merges two transactions, then count the description lines it would
+  // strand in a block of their own (header and footer, which sit outside
+  // the transactions, are not description and do not count). Picking by the
+  // widest proportional jump instead fails on statements whose line spacing
+  // barely changes between transactions — Yapı Kredi separates rows by half
+  // a point — where the jump is real but far too small to stand out.
+  const stranded = t => {
+    let count = 0;
+    for (const block of blocksAt(t)) {
+      let anchors = 0;
+      for (const i of block) if (anchorSet.has(i)) anchors++;
+      if (anchors > 1) return null;
+      if (!anchors && block.some(i => i > firstAnchor && i < lastAnchor)) count++;
+    }
+    return count;
+  };
+
+  const values = Array.from(new Set(gaps.filter(g => g > 0))).sort((a, b) => a - b);
+  let threshold, best = Infinity;
+  for (let i = 1; i < values.length; i++) {
+    const t = (values[i - 1] + values[i]) / 2;
+    const cost = stranded(t);
+    if (cost === null) continue;
+    if (cost < best || (cost === best && t > threshold)) { best = cost; threshold = t; }
   }
-  return blocks;
+  if (threshold === undefined) return null;
+
+  return blocksAt(threshold);
 }
 
 // ── Build ledger rows: Tarih | … | Açıklama | Tutar | Bakiye | … ──────
@@ -1643,6 +1666,24 @@ function buildLedgerRows(lines, anchorIdx, amountCols, textCols, rowPitch) {
   const groups = anchorIdx.map(i => ({ anchorLine: lines[i], wrapLines: [] }));
   const groupOfAnchor = new Map(anchorIdx.map((li, gi) => [li, gi]));
   const assigned = new Set(anchorIdx);
+
+  // The repeated table header sits one ordinary line-height above a page's
+  // first transaction — close enough to pass for wrapped description. Two
+  // things tell it apart from real description: it starts in the Tarih
+  // column (some banks) and it labels the money columns (all of them),
+  // whereas description text never reaches into those.
+  const dateX = lines[anchorIdx[0]].items[0].x;
+  const isContinuation = line => {
+    if (line.items[0].x <= dateX + 6) return false;
+    for (const it of line.items) {
+      if (AMOUNT_RE.test(it.text) || it.text === '-') continue;
+      const end = it.x + (it.width || 0);
+      for (const c of amountCols) {
+        if (end > c.lo + AMOUNT_EDGE_TOL && it.x < c.hi - AMOUNT_EDGE_TOL) return false;
+      }
+    }
+    return true;
+  };
 
   const blocks = splitLinesIntoBlocks(lines, anchorSet);
   const blockOf = blocks && blocks.filter(b => b.some(i => anchorSet.has(i)));
@@ -1659,6 +1700,7 @@ function buildLedgerRows(lines, anchorIdx, amountCols, textCols, rowPitch) {
       block.forEach(i => {
         if (i === anchorLine) return;
         if (Math.abs(lines[i].y - lines[anchorLine].y) > reach) return;
+        if (!isContinuation(lines[i])) return;
         groups[gi].wrapLines.push(lines[i]);
         assigned.add(i);
       });
@@ -1672,7 +1714,7 @@ function buildLedgerRows(lines, anchorIdx, amountCols, textCols, rowPitch) {
     const maxDrift = Math.max(rowPitch * 0.45, 6);
 
     lines.forEach((line, i) => {
-      if (assigned.has(i)) return;
+      if (assigned.has(i) || !isContinuation(line)) return;
       let best = -1, bestDist = Infinity;
       anchorIdx.forEach((ai, ri) => {
         const d = Math.abs(lines[ai].y - line.y);
