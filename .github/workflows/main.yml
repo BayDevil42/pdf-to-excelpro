@@ -18,6 +18,17 @@ jobs:
       - name: Bağımlılıkları yükle
         run: pip install pywebview pyinstaller
 
+      # Stamp the release number into the UI so the app can show its own
+      # version and notice when a newer release is published.
+      - name: Sürüm numarasını göm
+        shell: pwsh
+        run: |
+          $p = 'src/index.html'
+          $c = Get-Content $p -Raw -Encoding UTF8
+          if ($c -notmatch '__BUILD_VERSION__') { throw 'Sürüm yer tutucusu bulunamadı' }
+          $c = $c -replace '__BUILD_VERSION__', '${{ github.run_number }}'
+          Set-Content $p -Value $c -NoNewline -Encoding UTF8
+
       - name: EXE oluştur
         run: pyinstaller app.spec
 

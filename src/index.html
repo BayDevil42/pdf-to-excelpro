@@ -723,6 +723,34 @@ body {
   color: var(--muted);
   margin-bottom: 20px;
 }
+.modal-update {
+  font-family: var(--mono);
+  font-size: 11px;
+  margin: -12px 0 20px;
+}
+.modal-update.current { color: var(--muted); }
+.modal-update a {
+  color: var(--warn);
+  cursor: pointer;
+  text-decoration: underline;
+}
+/* Update pill in the top bar — only rendered when a newer build exists. */
+.update-pill {
+  display: none;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--warn);
+  border: 1px solid var(--warn);
+  border-radius: 6px;
+  padding: 5px 10px;
+  cursor: pointer;
+  background: transparent;
+}
+.update-pill.show { display: flex; }
+.update-pill:hover { background: rgba(245, 158, 11, 0.12); }
 .modal-divider {
   height: 1px;
   background: var(--border);
@@ -832,6 +860,7 @@ body {
     <div class="page-info" id="pageInfo">— / —</div>
     <button class="btn btn-ghost" id="btnPrev" disabled onclick="changePage(-1)">‹</button>
     <button class="btn btn-ghost" id="btnNext" disabled onclick="changePage(1)">›</button>
+    <button class="update-pill" id="updatePill" onclick="openReleases()" title="Yeni sürümü indir"></button>
     <div class="topbar-sep"></div>
     <button class="btn btn-ghost" onclick="showAbout()" style="font-size:11px;padding:6px 10px">ℹ</button>
   </div>
@@ -972,7 +1001,8 @@ body {
 <div class="modal-overlay" id="aboutModal" onclick="if(event.target===this) hideAbout()">
   <div class="modal-box">
     <div class="modal-logo">▣ PDF→XLS PRO</div>
-    <div class="modal-version">v2.0 — Mali Müşavirlik Sürümü</div>
+    <div class="modal-version" id="modalVersion">Mali Müşavirlik Sürümü</div>
+    <div class="modal-update" id="modalUpdate"></div>
 
     <div class="modal-divider"></div>
 
@@ -1017,6 +1047,15 @@ body {
 
 <script>
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+// ── Version ───────────────────────────────────────────
+// The release workflow rewrites BUILD_VERSION to the run number it tags the
+// release with, so the running EXE can tell the user which build they have
+// and notice when a newer one is out. Left as the literal placeholder when
+// the page is opened straight from the repo.
+const BUILD_VERSION = '__BUILD_VERSION__';
+const APP_VERSION = /^\d+$/.test(BUILD_VERSION) ? Number(BUILD_VERSION) : null;
+const RELEASES_URL = 'https://github.com/BayDevil42/pdf-to-excelpro/releases/latest';
 
 // ── State ────────────────────────────────────────────
 let pdfDoc = null;
@@ -2457,6 +2496,7 @@ function doExport(sels, type, baseName) {
     ['Talvixa'],
     [''],
     ['Geliştirici:', 'Levent Emirhan Özhan'],
+    ['Sürüm:', APP_VERSION === null ? 'Geliştirme sürümü' : 'v' + APP_VERSION],
     ['Dışa Aktarım:', new Date().toLocaleString('tr-TR')],
     ['Banka Profili:', document.getElementById('bankSelect').options[document.getElementById('bankSelect').selectedIndex].text],
     ['Toplam Sayfa:', Object.keys(byPage).length],
@@ -2519,14 +2559,56 @@ function saveFileToDisk(filename, base64data, kind) {
   toast(`✅ ${filename} indirildi`);
 }
 
-// Open the Talvixa website. Uses the desktop app's system browser
+// Open a link outside the app. Uses the desktop app's system browser
 // bridge when available, falls back to a normal new tab.
-function openTalvixa() {
-  const url = 'https://talvixa.com';
+function openExternal(url) {
   if (window.pywebview && window.pywebview.api && window.pywebview.api.open_link) {
     window.pywebview.api.open_link(url);
   } else {
     window.open(url, '_blank');
+  }
+}
+function openTalvixa() { openExternal('https://talvixa.com'); }
+function openReleases() { openExternal(RELEASES_URL); }
+
+// ── Version & update check ────────────────────────────────────────────
+// Releases are tagged v<run number>, so "newer" is a plain integer compare.
+// Everything here is best-effort: with no network, or on a build that was
+// never stamped with a version, the UI simply says nothing about updates.
+function showVersion() {
+  const label = APP_VERSION === null ? 'Geliştirme sürümü' : 'v' + APP_VERSION;
+  document.getElementById('modalVersion').textContent = label + ' — Mali Müşavirlik Sürümü';
+}
+
+async function checkForUpdate() {
+  if (APP_VERSION === null) return;
+  let latest;
+  try {
+    const res = await fetch('https://api.github.com/repos/BayDevil42/pdf-to-excelpro/releases/latest',
+      { headers: { 'Accept': 'application/vnd.github+json' } });
+    if (!res.ok) return;
+    const m = /^v?(\d+)$/.exec(((await res.json()).tag_name || '').trim());
+    if (!m) return;
+    latest = Number(m[1]);
+  } catch (e) {
+    return;  // offline, blocked, rate-limited — not worth bothering the user
+  }
+
+  const note = document.getElementById('modalUpdate');
+  if (latest > APP_VERSION) {
+    const pill = document.getElementById('updatePill');
+    pill.textContent = '⬆ Yeni sürüm v' + latest;
+    pill.classList.add('show');
+    note.innerHTML = '';
+    note.classList.remove('current');
+    const a = document.createElement('a');
+    a.textContent = 'Yeni sürüm v' + latest + ' mevcut — indirmek için tıklayın';
+    a.onclick = openReleases;
+    note.appendChild(a);
+    toast('⬆ Yeni sürüm v' + latest + ' yayınlandı — ℹ menüsünden indirebilirsiniz');
+  } else {
+    note.textContent = 'En güncel sürümü kullanıyorsunuz.';
+    note.classList.add('current');
   }
 }
 
@@ -2583,6 +2665,10 @@ function showAbout() {
 function hideAbout() {
   document.getElementById('aboutModal').classList.remove('show');
 }
+
+// ── Startup ───────────────────────────────────────────────────────────
+showVersion();
+setTimeout(checkForUpdate, 2500);
 </script>
 </body>
 </html>
